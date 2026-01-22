@@ -1,0 +1,15 @@
+# Visual Studio
+.vs/
+*.user
+*.suo
+*.cache
+
+# Build outputs
+bin/
+obj/
+*.pdb
+*.dll
+*.exe
+*.deps.json
+*.runtimeconfig.json
+*.zip
