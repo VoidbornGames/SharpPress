@@ -5,6 +5,8 @@ using SharpPress.Models;
 using SharpPress.Servers;
 using SharpPress.Services;
 using System.Diagnostics;
+using System.IO;
+using System.Reflection;
 
 namespace SharpPress
 {
@@ -21,6 +23,23 @@ namespace SharpPress
                 sftpPort = parsedSftpPort;
 
             var builder = WebApplication.CreateBuilder(args);
+
+            var pluginConfigPath = Path.Combine(AppContext.BaseDirectory, "plugin_security.json");
+            if (!File.Exists(pluginConfigPath))
+            {
+                File.WriteAllText(pluginConfigPath, @"
+                {
+                    ""DefaultMode"": ""Deny"",
+                    ""Policies"": 
+                     [
+                       { ""ServiceType"": ""SharpPress.Services.UserService"", ""RequiredPermission"": 1 },
+                       { ""ServiceType"": ""SharpPress.Plugins.IEventBus"", ""RequiredPermission"": 8 }
+                     ]
+                }");
+            }
+
+            builder.Configuration.AddJsonFile("plugin_security.json", optional: false, reloadOnChange: true);
+
             builder.WebHost.ConfigureKestrel(options =>
             {
                 options.ListenAnyIP(httpPort);
@@ -37,21 +56,21 @@ namespace SharpPress
             builder.Services.AddSingleton<CacheService>();
             builder.Services.AddSingleton<IEventBus, InMemoryEventBus>();
             builder.Services.AddSingleton<Services.EventHandler>();
-            builder.Services.AddSingleton<PluginManager>();
-            builder.Services.AddSingleton<DownloadJobProcessor>();
             builder.Services.AddSingleton<UserService>();
+            builder.Services.AddSingleton<SftpServer>();
+            builder.Services.AddSingleton<WebSocketServer>();
+            builder.Services.AddSingleton<ValidationService>();
+            builder.Services.AddSingleton<ServiceSecurityPolicy>();
+            builder.Services.AddSingleton<DownloadJobProcessor>();
 
             // Scoped
             builder.Services.AddScoped<AuthenticationService>();
-            builder.Services.AddScoped<ValidationService>();
             builder.Services.AddScoped<PackageManager>();
             builder.Services.AddScoped<VideoService>();
             builder.Services.AddScoped<Nginx>();
 
+            // Background Services
             builder.Services.AddHostedService<GenericHostedServiceWrapper<SftpServer>>();
-            builder.Services.AddHostedService<GenericHostedServiceWrapper<WebSocketServer>>();
-
-            builder.Services.AddHostedService<HtmlRefresherBackgroundService>();
 
             var app = builder.Build();
             var serviceProvider = app.Services;
@@ -62,19 +81,27 @@ namespace SharpPress
 
             var eventBus = serviceProvider.GetRequiredService<IEventBus>();
             var eventHandler = serviceProvider.GetRequiredService<Services.EventHandler>();
-            var pluginManager = serviceProvider.GetRequiredService<PluginManager>();
 
             eventBus.Subscribe<PluginLoadedEvent>(eventHandler);
             eventBus.Subscribe<VideoUploadedEvent>(eventHandler);
             eventBus.Subscribe<UserRegisteredEvent>(eventHandler);
 
-            pluginManager._serviceProvider = serviceProvider;
             if (Directory.Exists(Path.Combine("plugins", ".plugin_temp")))
                 Directory.Delete(Path.Combine("plugins", ".plugin_temp"), true);
 
+            var pluginManager = new PluginManager(
+                logger: serviceProvider.GetRequiredService<Logger>(),
+                eventBus: serviceProvider.GetRequiredService<IEventBus>(),
+                serviceProvider: serviceProvider,
+                scopeFactory: serviceProvider.GetRequiredService<IServiceScopeFactory>(),
+                routeBuilder: app,
+                securityPolicy: serviceProvider.GetRequiredService<ServiceSecurityPolicy>()
+            );
+
             await pluginManager.LoadPluginsAsync();
 
-            app.UseMiddleware<PluginMiddleware>();
+            app.UseMiddleware<PluginMiddleware>(pluginManager);
+
             app.Use(async (context, next) =>
             {
                 context.Response.Headers.Append("Access-Control-Allow-Origin", "*");
@@ -88,20 +115,18 @@ namespace SharpPress
                 await next();
             });
 
-            Endpoints.Map(app);
+            Endpoints.Map(app, pluginManager);
+
+            app.MapPost("/api/plugins/reload", async (HttpRequest req, PluginManager pm) =>
+            {
+                await pm.ReloadAllPluginsAsync();
+                return Results.Ok("Plugins Reloaded");
+            });
+
             app.MapFallback(async context =>
             {
-                var cache = serviceProvider.GetRequiredService<HtmlCache>();
-                if (!string.IsNullOrEmpty(cache.Html))
-                {
-                    context.Response.ContentType = "text/html";
-                    await context.Response.WriteAsync(cache.Html);
-                }
-                else
-                {
-                    context.Response.StatusCode = 404;
-                    await context.Response.WriteAsync("Not Found");
-                }
+                context.Response.ContentType = "text/html";
+                await context.Response.WriteAsync(@"<p>404 Not Found</p>");
             });
 
             var lifetime = app.Lifetime;
@@ -112,6 +137,7 @@ namespace SharpPress
                 logger.Log("✅ Shutdown complete.");
             });
 
+            logger.Log($"⚠️ Ensure Nginx is configured to proxy port 443 to localhost:{httpPort}");
             logger.Log($"🚀 Server started successfully on HTTP port {httpPort}!");
             app.Run();
         }

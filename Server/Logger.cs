@@ -59,6 +59,9 @@ namespace SharpPress.Services
             string logEntry = $"[{DateTime.Now:yyyy-MM-dd HH:mm:ss}] [{level}] {message}";
             Console.WriteLine(logEntry);
 
+            if (!Directory.Exists(_logsFolder))
+                Directory.CreateDirectory(_logsFolder);
+
             lock (_logLock)
             {
                 File.AppendAllText(_logFile, logEntry + Environment.NewLine);

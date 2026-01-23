@@ -4,6 +4,17 @@ using SharpPress.Services;
 
 namespace SharpPress.Models
 {
+    public class PluginSecurityOptions
+    {
+        public string DefaultMode { get; set; } = "Deny";
+        public List<ServicePolicyEntry> Policies { get; set; } = new();
+    }
+
+    public class ServicePolicyEntry
+    {
+        public string ServiceType { get; set; } = "";
+        public int RequiredPermission { get; set; }
+    }
     public interface IManualServer
     {
         Task Start();

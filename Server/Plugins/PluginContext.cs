@@ -1,41 +1,91 @@
-﻿using Microsoft.Extensions.DependencyInjection;
-using Microsoft.Extensions.Logging;
-using System;
-using System.Collections.Generic;
-using System.Net;
-using System.Threading.Tasks;
+﻿using Microsoft.AspNetCore.Http;
+using Microsoft.AspNetCore.Routing;
+using Microsoft.Extensions.DependencyInjection;
 using SharpPress.Plugins;
-using SharpPress.Services;
+using System;
+using System.Threading.Tasks;
 
 namespace SharpPress.Services
 {
-    /// <summary>
-    /// Implementation of IPluginContext
-    /// </summary>
     public class PluginContext : IPluginContext
     {
         public Logger Logger { get; }
-        public IEventBus EventBus { get; }
-        public IServiceProvider ServiceProvider { get; }
+        public IServiceScopeFactory ScopeFactory { get; }
 
-        private readonly Dictionary<string, Func<HttpRequest, Task>> _routes = new();
+        private readonly IEndpointRouteBuilder _routes;
+        private readonly PluginPermissions _grantedPermissions;
+        private readonly ServiceSecurityPolicy _securityPolicy;
 
-        public PluginContext(Logger serverLogger, IEventBus eventBus, IServiceProvider serviceProvider)
+        public PluginContext(
+            Logger logger,
+            IServiceScopeFactory scopeFactory,
+            IEndpointRouteBuilder routes,
+            PluginPermissions grantedPermissions,
+            ServiceSecurityPolicy securityPolicy)
         {
-            Logger = serverLogger;
-            EventBus = eventBus;
-            ServiceProvider = serviceProvider;
+            Logger = logger;
+            ScopeFactory = scopeFactory;
+            _routes = routes;
+            _grantedPermissions = grantedPermissions;
+            _securityPolicy = securityPolicy;
         }
 
-        public void RegisterApiRoute(string path, Func<HttpRequest, Task> handler)
+        public void MapGet(string pattern, Delegate handler) => MapRoute(pattern, handler);
+        public void MapPost(string pattern, Delegate handler) => MapRoute(pattern, handler);
+        public void Map(string pattern, Delegate handler) => MapRoute(pattern, handler);
+
+        private void MapRoute(string pattern, Delegate handler)
         {
-            _routes[path] = handler;
-            Logger.Log($"🔌 Plugin registered route: {path}");
+            RequestDelegate secureWrapper = async (httpContext) =>
+            {
+                var originalProvider = httpContext.RequestServices;
+                var restrictedProvider = new RestrictedServiceProvider(originalProvider, _grantedPermissions, _securityPolicy);
+
+                httpContext.RequestServices = restrictedProvider;
+
+                try
+                {
+                    var result = handler.DynamicInvoke(httpContext);
+
+                    if (result is Task task)
+                    {
+                        await task;
+                        if (task.GetType().IsGenericType && task.GetType().GetGenericTypeDefinition() == typeof(Task<>))
+                        {
+                            var resultProperty = task.GetType().GetProperty("Result");
+                            var innerResult = resultProperty?.GetValue(task);
+                            if (innerResult is IResult iResult)
+                            {
+                                await iResult.ExecuteAsync(httpContext);
+                            }
+                        }
+                    }
+                    else if (result is IResult iResult)
+                    {
+                        await iResult.ExecuteAsync(httpContext);
+                    }
+                }
+                catch (Exception ex)
+                {
+                    httpContext.Response.StatusCode = 500;
+                    await httpContext.Response.WriteAsync($"Plugin Error: {ex.Message}");
+                }
+                finally
+                {
+                    httpContext.RequestServices = originalProvider;
+                }
+            };
+
+            _routes.Map(pattern, secureWrapper);
         }
 
-        public Func<HttpRequest, Task> GetRouteHandler(string path)
+        public T GetService<T>()
         {
-            return _routes.TryGetValue(path, out var handler) ? handler : null;
+            var scope = ScopeFactory.CreateScope();
+            var restrictedProvider = new RestrictedServiceProvider(scope.ServiceProvider, _grantedPermissions, _securityPolicy);
+            var service = restrictedProvider.GetService(typeof(T));
+            if (service == null) throw new InvalidOperationException($"Service {typeof(T).Name} not found.");
+            return (T)service;
         }
     }
 }

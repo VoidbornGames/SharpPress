@@ -5,14 +5,14 @@ using SharpPress.Helpers;
 using SharpPress.Models;
 using SharpPress.Services;
 using System.Net;
+using System.Security.Claims;
 
 namespace SharpPress
 {
     public static class Endpoints
     {
-        public static void Map(WebApplication app)
+        public static void Map(WebApplication app, PluginManager pluginManager)
         {
-            // --- Shared Helper for Authentication ---
             bool ValidateAdmin(HttpRequest request, AuthenticationService authService)
             {
                 string authHeader = request.Headers["Authorization"].ToString();
@@ -43,10 +43,7 @@ namespace SharpPress
                         user = new { username = user.Username, role = user.Role, email = user.Email }
                     });
                 }
-                else
-                {
-                    return Results.Unauthorized();
-                }
+                return Results.Unauthorized();
             });
 
             // --- /api/register ---
@@ -77,11 +74,11 @@ namespace SharpPress
             // --- /api/plugins ---
             app.MapGet("/api/plugins", (
                 HttpRequest request,
-                PluginManager pluginManager,
                 [FromServices] AuthenticationService authService) =>
             {
                 if (!ValidateAdmin(request, authService)) return Results.Unauthorized();
 
+                // Uses the pluginManager passed to this method
                 var plugins = pluginManager.GetLoadedPlugins();
                 var pluginList = plugins.Select(p => new
                 {
@@ -97,7 +94,6 @@ namespace SharpPress
             // --- /api/plugins/upload ---
             app.MapPost("/api/plugins/upload", async (
                 HttpRequest request,
-                PluginManager pluginManager,
                 PackageManager packageManager,
                 Logger logger,
                 [FromServices] AuthenticationService authService) =>
@@ -121,7 +117,6 @@ namespace SharpPress
                 try
                 {
                     logger.Log("📤 Receiving plugin file...");
-
                     using (var stream = new FileStream(tempFilePath, FileMode.Create))
                     {
                         await file.CopyToAsync(stream);
@@ -166,10 +161,10 @@ namespace SharpPress
             // --- /api/plugins/reload ---
             app.MapPost("/api/plugins/reload", async (
                 HttpRequest request,
-                PluginManager pluginManager,
                 [FromServices] AuthenticationService authService) =>
             {
                 if (!ValidateAdmin(request, authService)) return Results.Unauthorized();
+
                 await pluginManager.ReloadAllPluginsAsync();
                 return Results.Ok(new { success = true, message = "Plugins reloaded successfully." });
             });
@@ -177,7 +172,6 @@ namespace SharpPress
             // --- /api/market/plugins ---
             app.MapGet("/api/market/plugins", async (
                 HttpRequest request,
-                PluginManager pluginManager,
                 [FromServices] AuthenticationService authService) =>
             {
                 if (!ValidateAdmin(request, authService)) return Results.Unauthorized();
@@ -216,7 +210,6 @@ namespace SharpPress
             app.MapPost("/api/marketplace/download", async (
                 HttpRequest request,
                 [FromBody] MarketPlugin downloadRequest,
-                DownloadJobProcessor downloadJobProcessor,
                 [FromServices] AuthenticationService authService) =>
             {
                 if (!ValidateAdmin(request, authService)) return Results.Unauthorized();
@@ -226,19 +219,19 @@ namespace SharpPress
                     return Results.BadRequest(new { success = false, message = "Request body must contain a valid 'DownloadLink' and 'Name' property." });
                 }
 
+                var downloadJobProcessor = request.HttpContext.RequestServices.GetRequiredService<DownloadJobProcessor>();
                 downloadJobProcessor.EnqueueJob(downloadRequest);
 
                 return Results.Accepted(null, new { success = true, message = $"Download request for '{downloadRequest.Name}.dll' has been queued and will be processed." });
             });
 
             // --- /videos/{filename} ---
-            app.MapGet("/videos/{filename}", (string filename, VideoService videoService) =>
+            app.MapGet("/videos/{filename}", (string filename, [FromServices] VideoService videoService) =>
             {
                 string filePath = videoService.GetVideoFilePath(filename);
                 if (filePath == null || !File.Exists(filePath)) return Results.NotFound("Video file not found");
 
                 string contentType = videoService.GetContentType(filePath);
-
                 return Results.File(filePath, contentType, enableRangeProcessing: true);
             });
         }
