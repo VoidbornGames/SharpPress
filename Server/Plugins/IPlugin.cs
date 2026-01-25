@@ -13,16 +13,9 @@ namespace SharpPress.Plugins
         string Version { get; }
 
         /// <summary>
-        /// The permissions this plugin requires to function.
-        /// The server will verify these against its security policy.
-        /// </summary>
-        PluginPermissions RequiredPermissions { get; }
-
-        /// <summary>
         /// Called when the plugin is loaded.
         /// </summary>
         Task OnLoadAsync(IPluginContext context);
-
         Task OnUpdateAsync(IPluginContext context);
         Task OnUnloadAsync();
     }

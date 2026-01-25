@@ -30,14 +30,5 @@ namespace SharpPress.Plugins
         /// Maps a generic route (PUT, DELETE, etc).
         /// </summary>
         void Map(string pattern, Delegate handler);
-
-        // --- Security & Service Access ---
-
-        /// <summary>
-        /// Securely retrieves a service from the Dependency Injection container.
-        /// Throws an exception if the plugin does not have the required permission.
-        /// </summary>
-        /// <typeparam name="T">The type of service to retrieve.</typeparam>
-        T GetService<T>();
     }
 }

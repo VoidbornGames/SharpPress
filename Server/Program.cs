@@ -4,9 +4,6 @@ using SharpPress.Helpers;
 using SharpPress.Models;
 using SharpPress.Servers;
 using SharpPress.Services;
-using System.Diagnostics;
-using System.IO;
-using System.Reflection;
 
 namespace SharpPress
 {
@@ -37,13 +34,13 @@ namespace SharpPress
                      ]
                 }");
             }
-
-            builder.Configuration.AddJsonFile("plugin_security.json", optional: false, reloadOnChange: true);
+            builder.Configuration.AddJsonFile(pluginConfigPath, optional: false, reloadOnChange: true);
 
             builder.WebHost.ConfigureKestrel(options =>
             {
                 options.ListenAnyIP(httpPort);
             });
+            builder.Services.AddRazorPages();
 
             // Singletons
             builder.Services.AddSingleton<Logger>();
@@ -60,17 +57,12 @@ namespace SharpPress
             builder.Services.AddSingleton<SftpServer>();
             builder.Services.AddSingleton<WebSocketServer>();
             builder.Services.AddSingleton<ValidationService>();
-            builder.Services.AddSingleton<ServiceSecurityPolicy>();
+            builder.Services.AddSingleton<PluginManager>();
             builder.Services.AddSingleton<DownloadJobProcessor>();
-
-            // Scoped
-            builder.Services.AddScoped<AuthenticationService>();
-            builder.Services.AddScoped<PackageManager>();
-            builder.Services.AddScoped<VideoService>();
-            builder.Services.AddScoped<Nginx>();
-
-            // Background Services
-            builder.Services.AddHostedService<GenericHostedServiceWrapper<SftpServer>>();
+            builder.Services.AddSingleton<AuthenticationService>();
+            builder.Services.AddSingleton<PackageManager>();
+            builder.Services.AddSingleton<VideoService>();
+            builder.Services.AddSingleton<Nginx>();
 
             var app = builder.Build();
             var serviceProvider = app.Services;
@@ -89,15 +81,8 @@ namespace SharpPress
             if (Directory.Exists(Path.Combine("plugins", ".plugin_temp")))
                 Directory.Delete(Path.Combine("plugins", ".plugin_temp"), true);
 
-            var pluginManager = new PluginManager(
-                logger: serviceProvider.GetRequiredService<Logger>(),
-                eventBus: serviceProvider.GetRequiredService<IEventBus>(),
-                serviceProvider: serviceProvider,
-                scopeFactory: serviceProvider.GetRequiredService<IServiceScopeFactory>(),
-                routeBuilder: app,
-                securityPolicy: serviceProvider.GetRequiredService<ServiceSecurityPolicy>()
-            );
-
+            var pluginManager = serviceProvider.GetRequiredService<PluginManager>();
+            await pluginManager.Initialize(app);
             await pluginManager.LoadPluginsAsync();
 
             app.UseMiddleware<PluginMiddleware>(pluginManager);
@@ -115,25 +100,19 @@ namespace SharpPress
                 await next();
             });
 
+            app.MapRazorPages();
             Endpoints.Map(app, pluginManager);
-
-            app.MapPost("/api/plugins/reload", async (HttpRequest req, PluginManager pm) =>
-            {
-                await pm.ReloadAllPluginsAsync();
-                return Results.Ok("Plugins Reloaded");
-            });
-
-            app.MapFallback(async context =>
-            {
-                context.Response.ContentType = "text/html";
-                await context.Response.WriteAsync(@"<p>404 Not Found</p>");
-            });
 
             var lifetime = app.Lifetime;
             lifetime.ApplicationStopping.Register(() =>
             {
                 logger.Log("🛑 Shutdown requested...");
+
+                serviceProvider.GetRequiredService<SftpServer>().StopAsync().GetAwaiter().GetResult();
+                serviceProvider.GetRequiredService<DownloadJobProcessor>().StopAsync().GetAwaiter().GetResult();
+
                 pluginManager.UnloadAllPluginsAsync().GetAwaiter().GetResult();
+
                 logger.Log("✅ Shutdown complete.");
             });
 
@@ -141,5 +120,7 @@ namespace SharpPress
             logger.Log($"🚀 Server started successfully on HTTP port {httpPort}!");
             app.Run();
         }
+
+
     }
 }

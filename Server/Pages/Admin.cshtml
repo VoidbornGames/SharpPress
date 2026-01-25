@@ -1,0 +1,127 @@
+﻿@page "/admin"
+@inject SharpPress.Services.UserService _userService
+@inject SharpPress.Services.PluginManager _pluginManager
+@inject SharpPress.Services.VideoService _videoService
+
+@using System.Diagnostics
+@using System.Linq
+@using System.Text
+
+@{
+    async Task<string> getUpTime() => (DateTime.Now - Process.GetCurrentProcess().StartTime).ToString(@"hh\:mm\:ss");
+}
+
+@{
+    Layout = "_AdminLayout";
+    ViewData["Title"] = "Dashboard";
+
+    string logFile = System.IO.Path.Combine(AppContext.BaseDirectory, "logs", "latest.log");
+    string[] logs = System.IO.File.Exists(logFile) ? System.IO.File.ReadLines(logFile).Reverse().Take(200).Reverse().ToArray() : Array.Empty<string>();
+}
+
+<!-- 1. Status Overview -->
+<div class="stats-grid">
+    <div class="stat-box">
+        <div class="stat-label">UpTime</div>
+        <div class="stat-value" id="uptime">
+            <p id="uptime">Loading...</p>
+        </div>
+    </div>
+    <div class="stat-box">
+        <div class="stat-label">CPU Usage</div>
+        <div class="stat-value">
+            <p id="cpuUsage">Loading...</p>
+        </div>
+    </div>
+    <div class="stat-box">
+        <div class="stat-label">Ram Usage</div>
+        <div class="stat-value">
+            <p id="memoryMB">Loading...</p>
+        </div>
+    </div>
+    <div class="stat-box">
+        <div class="stat-label">Users</div>
+        <div class="stat-value">
+            <p id="users">Loading...</p>
+        </div>
+    </div>
+    <div class="stat-box">
+        <div class="stat-label">Disk Usage</div>
+        <div class="stat-value">
+            <p id="diskUsedGB">Loading...</p>
+        </div>
+    </div>
+    <div class="stat-box">
+        <div class="stat-label">Downloaded</div>
+        <div class="stat-value">
+            <p id="netReceivedMB">Loading...</p>
+        </div>
+    </div>
+    <div class="stat-box">
+        <div class="stat-label">Uploaded</div>
+        <div class="stat-value">
+            <p id="netSentMB">Loading...</p>
+        </div>
+    </div>
+    <div class="stat-box">
+        <div class="stat-label">Active Plugins</div>
+        <div class="stat-value">
+            <p id="activePlugins">Loading...</p>
+        </div>
+    </div>
+</div>
+
+<!-- 3. Logs Card -->
+<div class="card">
+    <div class="card-header">
+        <div class="card-title">System Logs</div>
+    </div>
+
+    @if (logs.Length <= 0)
+    {
+        <div class="alert alert-info">No logs available.</div>
+    }
+    else
+    {
+        <div class="table-container" style="max-height: 300px; overflow-y: auto;">
+            <table>
+                @foreach (var log in logs)
+                {
+                    <tr>
+                        <td style="font-family: monospace; font-size: 0.85rem;">@log</td>
+                    </tr>
+                }
+            </table>
+        </div>
+    }
+</div>
+
+
+<script>
+    async function fetchStats() {
+        try {
+            const response = await apiRequest('/api/stats', { method: 'GET'});
+            const data = await response.json();
+
+            const setText = (id, val, suffix = "") => {
+                const el = document.getElementById(id);
+                if (el) el.textContent = val + suffix;
+            };
+
+            setText("uptime", data.uptime);
+            setText("users", data.users);
+            setText("cpuUsage", data.cpuUsage, "%");
+            setText("memoryMB", data.memoryMB.toFixed(2), " MB");
+            setText("diskUsedGB", `${data.diskUsedGB.toFixed(2)} / ${data.diskTotalGB.toFixed(2)}`, " GB");
+            setText("netReceivedMB", data.netReceivedMB.toFixed(2), " MB");
+            setText("netSentMB", data.netSentMB.toFixed(2), " MB");
+            setText("activePlugins", data.activePlugins);
+        }
+        catch (error) {
+            console.error('Error fetching stats:', error);
+        }
+    }
+
+    fetchStats();
+    setInterval(fetchStats, 1000);
+</script>

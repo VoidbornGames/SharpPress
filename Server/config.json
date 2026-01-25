@@ -1,0 +1,15 @@
+{
+  "DebugMode": false,
+  "JwtSecret": "your-super-secret-jwt-key-change-this-in-production-32-chars-min",
+  "PanelDomain": "example.com",
+  "MaxFailedLoginAttempts": 5,
+  "LockoutDurationMinutes": 3,
+  "JwtExpiryHours": 24,
+  "EnableCompression": true,
+  "CacheExpiryMinutes": 15,
+  "email_host": "smtp.gmail.com",
+  "email_port": 587,
+  "email_username": "your-smtp-email-username",
+  "email_password": "your-smtp-email-password",
+  "email_useSsl": false
+}

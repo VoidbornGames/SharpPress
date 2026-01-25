@@ -1,16 +1,64 @@
-﻿using Microsoft.AspNetCore.Mvc;
+﻿using Microsoft.AspNetCore.Http;
+using Microsoft.AspNetCore.Mvc;
+using Microsoft.AspNetCore.StaticFiles;
 using Newtonsoft.Json;
-using Server.Services;
 using SharpPress.Helpers;
 using SharpPress.Models;
 using SharpPress.Services;
-using System.Net;
-using System.Security.Claims;
+using System.Collections.Concurrent;
+using System.Diagnostics;
+using System.Net.NetworkInformation;
+using System.Text;
 
 namespace SharpPress
 {
     public static class Endpoints
     {
+        public static bool cacheStaticFiles = true;
+
+        private static ConcurrentDictionary<string, byte[]> _fileCache = new ConcurrentDictionary<string, byte[]>();
+        private static ConcurrentDictionary<string, int> _readCounts = new ConcurrentDictionary<string, int>();
+        private static double _lastCpuUsage = 0;
+
+
+        static Endpoints()
+        {
+            _ = Task.Run(async () =>
+            {
+                var proc = Process.GetCurrentProcess();
+                TimeSpan prevCpu = proc.TotalProcessorTime;
+                DateTime prevTime = DateTime.UtcNow;
+
+                while (true)
+                {
+                    await Task.Delay(1000);
+                    TimeSpan currCpu = proc.TotalProcessorTime;
+                    DateTime currTime = DateTime.UtcNow;
+
+                    double cpuUsedMs = (currCpu - prevCpu).TotalMilliseconds;
+                    double elapsedMs = (currTime - prevTime).TotalMilliseconds;
+                    int cores = Environment.ProcessorCount;
+
+                    _lastCpuUsage = Math.Round(cpuUsedMs / (elapsedMs * cores) * 100, 2);
+
+                    prevCpu = currCpu;
+                    prevTime = currTime;
+                }
+            });
+
+            _ = Task.Run(async () =>
+            {
+                _readCounts.Clear();
+                await Task.Delay(TimeSpan.FromSeconds(60));
+            });
+
+            _ = Task.Run(async () =>
+            {
+                _fileCache.Clear();
+                await Task.Delay(TimeSpan.FromMinutes(30));
+            });
+        }
+
         public static void Map(WebApplication app, PluginManager pluginManager)
         {
             bool ValidateAdmin(HttpRequest request, AuthenticationService authService)
@@ -78,7 +126,6 @@ namespace SharpPress
             {
                 if (!ValidateAdmin(request, authService)) return Results.Unauthorized();
 
-                // Uses the pluginManager passed to this method
                 var plugins = pluginManager.GetLoadedPlugins();
                 var pluginList = plugins.Select(p => new
                 {
@@ -234,6 +281,194 @@ namespace SharpPress
                 string contentType = videoService.GetContentType(filePath);
                 return Results.File(filePath, contentType, enableRangeProcessing: true);
             });
+
+            app.MapGet("/api/stats", async (HttpRequest request, HttpResponse response, UserService userService) =>
+            {
+                try
+                {
+                    var proc = Process.GetCurrentProcess();
+                    double cpuUse = _lastCpuUsage;
+
+                    double memUsage = proc.WorkingSet64 / 1024.0 / 1024.0;
+                    int pluginsCount = pluginManager.GetLoadedPlugins().Count;
+
+                    double diskUsedGB = 0;
+                    double diskTotalGB = 0;
+                    long totalBytesSent = 0;
+                    long totalBytesReceived = 0;
+
+                    foreach (var nic in NetworkInterface.GetAllNetworkInterfaces())
+                    {
+                        if (nic.OperationalStatus == OperationalStatus.Up &&
+                            nic.NetworkInterfaceType != NetworkInterfaceType.Loopback &&
+                            nic.NetworkInterfaceType != NetworkInterfaceType.Tunnel)
+                        {
+                            try
+                            {
+                                var nicStats = nic.GetIPv4Statistics();
+                                totalBytesSent += nicStats.BytesSent;
+                                totalBytesReceived += nicStats.BytesReceived;
+                            }
+                            catch { }
+                        }
+                    }
+
+                    if (OperatingSystem.IsLinux())
+                    {
+                        try
+                        {
+                            string memInfo = File.ReadAllText("/proc/meminfo");
+                            string totalLine = memInfo.Split('\n').FirstOrDefault(l => l.StartsWith("MemTotal:"));
+                            string freeLine = memInfo.Split('\n').FirstOrDefault(l => l.StartsWith("MemAvailable:"));
+
+                            double totalMem = totalLine != null ? double.Parse(new string(totalLine.Where(char.IsDigit).ToArray())) / 1024.0 : memUsage;
+                            double freeMem = freeLine != null ? double.Parse(new string(freeLine.Where(char.IsDigit).ToArray())) / 1024.0 : 0;
+                            memUsage = totalMem - freeMem;
+
+                            DriveInfo drive = new DriveInfo("/");
+                            long totalSpace = drive.TotalSize;
+                            long usedSpace = totalSpace - drive.AvailableFreeSpace;
+
+                            diskUsedGB = usedSpace / (1024.0 * 1024 * 1024);
+                            diskTotalGB = totalSpace / (1024.0 * 1024 * 1024);
+                        }
+                        catch
+                        {
+                            diskUsedGB = 0; diskTotalGB = 0;
+                        }
+                    }
+                    else if (OperatingSystem.IsWindows())
+                    {
+                        try
+                        {
+                            string rootPath = Path.GetPathRoot(AppContext.BaseDirectory);
+                            if (!string.IsNullOrEmpty(rootPath))
+                            {
+                                DriveInfo drive = new DriveInfo(rootPath);
+                                long totalSpace = drive.TotalSize;
+                                long usedSpace = totalSpace - drive.AvailableFreeSpace;
+
+                                diskUsedGB = usedSpace / (1024.0 * 1024 * 1024);
+                                diskTotalGB = totalSpace / (1024.0 * 1024 * 1024);
+                            }
+                        }
+                        catch
+                        {
+                            diskUsedGB = 0; diskTotalGB = 0;
+                        }
+                    }
+
+                    object stats = new
+                    {
+                        cpuUsage = cpuUse,
+                        memoryMB = memUsage,
+                        diskUsedGB = diskUsedGB,
+                        diskTotalGB = diskTotalGB,
+                        netSentMB = totalBytesSent / (1024.0 * 1024),
+                        netReceivedMB = totalBytesReceived / (1024.0 * 1024),
+                        activePlugins = pluginsCount,
+                        uptime = (DateTime.Now - Process.GetCurrentProcess().StartTime).ToString(@"hh\:mm\:ss"),
+                        users = userService.usersCount
+                    };
+
+                    return Results.Ok(stats);
+                }
+                catch (Exception ex)
+                {
+                    return Results.Problem(ex.Message);
+                }
+            });
+
+            app.MapFallback("{*path}", async (HttpContext context, ILogger<Program> logger) =>
+            {
+                var rootPath = Path.Combine(AppContext.BaseDirectory, "public_html");
+                if (!Directory.Exists(rootPath)) Directory.CreateDirectory(rootPath);
+
+                var requestPath = context.Request.Path.Value?.TrimStart('/');
+                if (string.IsNullOrEmpty(requestPath)) requestPath = "index.html";
+                if (requestPath.EndsWith('/')) requestPath = requestPath.TrimEnd('/');
+
+                var filePath = Path.Combine(rootPath, requestPath);
+                if (await ServeFile(context, filePath, requestPath)) return;
+
+                if (!Path.HasExtension(requestPath))
+                {
+                    var indexPath = Path.Combine(rootPath, requestPath, "index.html");
+                    if (await ServeFile(context, indexPath, requestPath + "/")) return;
+                }
+
+                logger.LogWarning($"[StaticHandler] 404 Not Found: {requestPath}");
+                context.Response.StatusCode = 404;
+                context.Response.ContentType = "text/html";
+                await context.Response.WriteAsync("<div style='text-align: center; color: #ccc; font-family: sans-serif; padding-top: 50px;'><h1>404</h1><h3>File Not Found</h3><p>SharpPress</p></div>");
+            });
+        }
+
+        private static async Task<bool> ServeFile(HttpContext context, string filePath, string relativePath)
+        {
+            if (!File.Exists(filePath)) return false;
+
+            var fullPath = Path.GetFullPath(filePath);
+            var rootPath = Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "public_html"));
+
+            if (!fullPath.StartsWith(rootPath))
+            {
+                return false;
+            }
+
+            var contentType = new FileExtensionContentTypeProvider();
+            string ct;
+            if (!contentType.TryGetContentType(filePath, out ct)) ct = "application/octet-stream";
+
+            context.Response.ContentType = ct;
+
+            var ext = Path.GetExtension(filePath).ToLowerInvariant();
+
+            if (_fileCache.ContainsKey(relativePath))
+            {
+                await context.Response.Body.WriteAsync(_fileCache[relativePath]);
+            }
+            else
+            {
+                if (IsTextFile(filePath))
+                {
+                    var content = await File.ReadAllTextAsync(filePath);
+                    await context.Response.WriteAsync(content);
+
+                    if (cacheStaticFiles && _readCounts.AddOrUpdate(relativePath, 1, (k, v) => v + 1) >= 10)
+                    {
+                        _fileCache[relativePath] = Encoding.UTF8.GetBytes(content);
+                    }
+                }
+                else
+                {
+                    await context.Response.SendFileAsync(filePath);
+                }
+            }
+
+            return true;
+        }
+
+        private static bool IsTextFile(string path)
+        {
+            try
+            {
+                using (var fs = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read, 4096, FileOptions.SequentialScan))
+                {
+                    byte[] buffer = new byte[1024];
+                    int bytesRead = fs.Read(buffer, 0, buffer.Length);
+
+                    for (int i = 0; i < bytesRead; i++)
+                    {
+                        if (buffer[i] == 0) return false;
+                    }
+                }
+                return true;
+            }
+            catch
+            {
+                return false; // Safe fallback if file is locked or unreadable
+            }
         }
     }
 }

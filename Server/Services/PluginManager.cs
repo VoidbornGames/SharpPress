@@ -17,34 +17,30 @@ namespace SharpPress.Services
         private readonly IEventBus _eventBus;
         private readonly IServiceProvider _serviceProvider;
         private readonly IServiceScopeFactory _scopeFactory;
-        private readonly IEndpointRouteBuilder _routeBuilder;
-        private readonly ServiceSecurityPolicy _securityPolicy;
+        private IEndpointRouteBuilder _routeBuilder;
 
         private readonly ConcurrentDictionary<string, IPlugin> _loadedPlugins = new();
         private readonly ConcurrentDictionary<string, PluginContext> _pluginContexts = new();
         private readonly ConcurrentDictionary<string, PluginLoadContext> _loadContexts = new();
         private readonly ConcurrentDictionary<string, string> _uniquePaths = new();
-
         private readonly ConcurrentDictionary<string, Func<HttpContext, Task>> _globalRoutes = new();
 
-        private Dictionary<string, int> _pluginPermissionsMap = new();
 
         public PluginManager(
             Logger logger,
             IEventBus eventBus,
             IServiceProvider serviceProvider,
-            IServiceScopeFactory scopeFactory,
-            IEndpointRouteBuilder routeBuilder,
-            ServiceSecurityPolicy securityPolicy)
+            IServiceScopeFactory scopeFactory)
         {
             _logger = logger;
             _eventBus = eventBus;
             _serviceProvider = serviceProvider;
             _scopeFactory = scopeFactory;
-            _routeBuilder = routeBuilder;
-            _securityPolicy = securityPolicy;
+        }
 
-            LoadPermissions().GetAwaiter().GetResult();
+        public async Task Initialize(IEndpointRouteBuilder routeBuilder)
+        {
+            _routeBuilder = routeBuilder;
         }
 
         public async Task LoadPluginsAsync(string pluginsDirectory = "plugins")
@@ -64,44 +60,12 @@ namespace SharpPress.Services
                                     .ToList();
 
             if (!dllFiles.Any()) return;
-
             foreach (var dllFile in dllFiles)
             {
                 await LoadPluginFromFileAsync(dllFile, tempDir);
             }
 
             _logger.Log($"🔌 Plugin loading complete. {_loadedPlugins.Count} plugins loaded.");
-        }
-
-        private async Task LoadPermissions()
-        {
-            var path = Path.Combine("plugins", "plugins_permissions.json");
-
-            var dir = Path.GetDirectoryName(path);
-            if (dir != null && !Directory.Exists(dir))
-            {
-                Directory.CreateDirectory(dir);
-            }
-
-            if (!File.Exists(path))
-            {
-                await File.WriteAllTextAsync(path, JsonConvert.SerializeObject(_pluginPermissionsMap));
-                _logger.LogWarning($"⚠️ '{path}' not found. Creating empty permissions file. All plugins will have 0 permissions.");
-                _pluginPermissionsMap.Clear();
-                return;
-            }
-
-            try
-            {
-                string json = await File.ReadAllTextAsync(path);
-                _pluginPermissionsMap = JsonConvert.DeserializeObject<Dictionary<string, int>>(json) ?? new();
-                _logger.Log($"🔒 Loaded permissions for {_pluginPermissionsMap.Count} plugins.");
-            }
-            catch (Exception ex)
-            {
-                _logger.LogError($"❌ Failed to parse permissions file: {ex.Message}");
-                _pluginPermissionsMap.Clear();
-            }
         }
 
         /// <summary>
@@ -153,18 +117,7 @@ namespace SharpPress.Services
 
                     var pluginName = plugin.Name;
 
-                    PluginPermissions granted = PluginPermissions.None;
-                    if (_pluginPermissionsMap.TryGetValue(pluginName, out int permissionInt))
-                    {
-                        granted = (PluginPermissions)permissionInt;
-                        _logger.Log($"✅ Plugin '{pluginName}' granted: {granted}");
-                    }
-                    else
-                    {
-                        _logger.LogWarning($"⚠️ Plugin '{pluginName}' not in permissions list. Granted: None.");
-                    }
-
-                    var context = new PluginContext(_logger, _scopeFactory, _routeBuilder, granted, _securityPolicy);
+                    var context = new PluginContext(_logger, _scopeFactory, _routeBuilder);
                     _pluginContexts[plugin.Name] = context;
 
                     await plugin.OnLoadAsync(context);
@@ -181,7 +134,6 @@ namespace SharpPress.Services
         public async Task ReloadAllPluginsAsync()
         {
             _logger.Log("🔄 Reloading plugins...");
-            await LoadPermissions();
             await UnloadAllPluginsAsync();
             await Task.Delay(1000);
             await LoadPluginsAsync();

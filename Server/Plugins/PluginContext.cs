@@ -13,21 +13,15 @@ namespace SharpPress.Services
         public IServiceScopeFactory ScopeFactory { get; }
 
         private readonly IEndpointRouteBuilder _routes;
-        private readonly PluginPermissions _grantedPermissions;
-        private readonly ServiceSecurityPolicy _securityPolicy;
 
         public PluginContext(
             Logger logger,
             IServiceScopeFactory scopeFactory,
-            IEndpointRouteBuilder routes,
-            PluginPermissions grantedPermissions,
-            ServiceSecurityPolicy securityPolicy)
+            IEndpointRouteBuilder routes)
         {
             Logger = logger;
             ScopeFactory = scopeFactory;
             _routes = routes;
-            _grantedPermissions = grantedPermissions;
-            _securityPolicy = securityPolicy;
         }
 
         public void MapGet(string pattern, Delegate handler) => MapRoute(pattern, handler);
@@ -38,11 +32,7 @@ namespace SharpPress.Services
         {
             RequestDelegate secureWrapper = async (httpContext) =>
             {
-                var originalProvider = httpContext.RequestServices;
-                var restrictedProvider = new RestrictedServiceProvider(originalProvider, _grantedPermissions, _securityPolicy);
-
-                httpContext.RequestServices = restrictedProvider;
-
+                httpContext.RequestServices = httpContext.RequestServices;
                 try
                 {
                     var result = handler.DynamicInvoke(httpContext);
@@ -72,20 +62,11 @@ namespace SharpPress.Services
                 }
                 finally
                 {
-                    httpContext.RequestServices = originalProvider;
+                    httpContext.RequestServices = httpContext.RequestServices;
                 }
             };
 
             _routes.Map(pattern, secureWrapper);
-        }
-
-        public T GetService<T>()
-        {
-            var scope = ScopeFactory.CreateScope();
-            var restrictedProvider = new RestrictedServiceProvider(scope.ServiceProvider, _grantedPermissions, _securityPolicy);
-            var service = restrictedProvider.GetService(typeof(T));
-            if (service == null) throw new InvalidOperationException($"Service {typeof(T).Name} not found.");
-            return (T)service;
         }
     }
 }

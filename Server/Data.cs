@@ -68,6 +68,7 @@ namespace SharpPress.Models
         public int LockoutDurationMinutes { get; set; } = 3;
         public int JwtExpiryHours { get; set; } = 24;
         public bool EnableCompression { get; set; } = true;
+        public bool EnableStaticFileCache { get; set; } = true;
         public int CacheExpiryMinutes { get; set; } = 15;
         public string email_host { get; set; } = "smtp.gmail.com";
         public int email_port { get; set; } = 587;
