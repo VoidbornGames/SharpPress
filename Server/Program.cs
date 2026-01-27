@@ -1,4 +1,6 @@
-﻿using Server.Services;
+﻿using Microsoft.AspNetCore.Server.Kestrel.Core;
+using Microsoft.Extensions.DependencyInjection;
+using Server.Services;
 using SharpPress.Events;
 using SharpPress.Helpers;
 using SharpPress.Models;
@@ -20,35 +22,28 @@ namespace SharpPress
                 sftpPort = parsedSftpPort;
 
             var builder = WebApplication.CreateBuilder(args);
-
-            var pluginConfigPath = Path.Combine(AppContext.BaseDirectory, "plugin_security.json");
-            if (!File.Exists(pluginConfigPath))
-            {
-                File.WriteAllText(pluginConfigPath, @"
-                {
-                    ""DefaultMode"": ""Deny"",
-                    ""Policies"": 
-                     [
-                       { ""ServiceType"": ""SharpPress.Services.UserService"", ""RequiredPermission"": 1 },
-                       { ""ServiceType"": ""SharpPress.Plugins.IEventBus"", ""RequiredPermission"": 8 }
-                     ]
-                }");
-            }
-            builder.Configuration.AddJsonFile(pluginConfigPath, optional: false, reloadOnChange: true);
-
             builder.WebHost.ConfigureKestrel(options =>
             {
                 options.ListenAnyIP(httpPort);
             });
             builder.Services.AddRazorPages();
 
-            // Singletons
+            var options = new MiniDBOptions
+            {
+                DataDirectory = "database",
+                MemTableSizeBytes = 256 * 1024 * 1024,
+                Level0CompactionTrigger = 4,
+                MaxConcurrentWrites = 100
+            };
+
+            // Singletons 
             builder.Services.AddSingleton<Logger>();
             builder.Services.AddSingleton(provider => new ConfigManager(logger: provider.GetRequiredService<Logger>()));
             builder.Services.AddSingleton(provider => new EmailService(config: provider.GetRequiredService<ConfigManager>().Config));
             builder.Services.AddSingleton(provider => provider.GetRequiredService<ConfigManager>().Config);
             builder.Services.AddSingleton<FilePaths>();
             builder.Services.AddSingleton(provider => new ServerSettings { httpPort = httpPort, sftpPort = sftpPort });
+            builder.Services.AddSingleton(provider => new MiniDB(options, provider.GetRequiredService<Logger>()));
             builder.Services.AddSingleton<FeatherDatabase>();
             builder.Services.AddSingleton<CacheService>();
             builder.Services.AddSingleton<IEventBus, InMemoryEventBus>();
@@ -66,10 +61,13 @@ namespace SharpPress
 
             var app = builder.Build();
             var serviceProvider = app.Services;
+
             var logger = serviceProvider.GetRequiredService<Logger>();
             var configManager = serviceProvider.GetRequiredService<ConfigManager>();
+            var miniDB = serviceProvider.GetRequiredService<MiniDB>();
 
             logger.PrepareLogs();
+            await miniDB.StartAsync();
 
             var eventBus = serviceProvider.GetRequiredService<IEventBus>();
             var eventHandler = serviceProvider.GetRequiredService<Services.EventHandler>();
@@ -108,6 +106,7 @@ namespace SharpPress
             {
                 logger.Log("🛑 Shutdown requested...");
 
+                serviceProvider.GetRequiredService<MiniDB>().StopAsync().GetAwaiter().GetResult();
                 serviceProvider.GetRequiredService<SftpServer>().StopAsync().GetAwaiter().GetResult();
                 serviceProvider.GetRequiredService<DownloadJobProcessor>().StopAsync().GetAwaiter().GetResult();
 
@@ -120,7 +119,5 @@ namespace SharpPress
             logger.Log($"🚀 Server started successfully on HTTP port {httpPort}!");
             app.Run();
         }
-
-
     }
 }
