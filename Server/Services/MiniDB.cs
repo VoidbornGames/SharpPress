@@ -1,2334 +1,1241 @@
-﻿using System.Collections.Concurrent;
+﻿using System;
+using System.Collections.Concurrent;
+using System.Collections.Generic;
 using System.Diagnostics;
-using System.Runtime.CompilerServices;
-using System.Runtime.Serialization;
+using System.IO;
+using System.IO.Compression;
+using System.Linq;
 using System.Text;
+using System.Threading;
+using System.Threading.Tasks;
 
 namespace SharpPress.Services
 {
-    #region Core Storage Engine
+    public class MiniDBOptions
+    {
+        public string DataDirectory { get; set; } = "Database";
+        public long MemTableSizeBytes { get; set; } = 128 * 1024 * 1024;
+        public int BlockSizeBytes { get; set; } = 4096;
+        public long BlockCacheSizeBytes { get; set; } = 512 * 1024 * 1024;
+        public int MaxConcurrentWrites { get; set; } = 1000;
+        public bool EnableCompression { get; set; } = true;
+        public int Level0CompactionTrigger { get; set; } = 4;
+        public int TargetFileSizeBase { get; set; } = 64 * 1024 * 1024;
+        public int FlushIntervalMs { get; set; } = 1000;
+    }
 
-    /// <summary>
-    /// LSM-Tree based storage engine with WAL, MVCC, and background compaction.
-    /// </summary>
     public class MiniDB : IDisposable
     {
         private readonly MiniDBOptions _options;
         private readonly Logger _logger;
-
-        private readonly WriteAheadLog _wal;
-        private readonly MemTable _memTable;
-        private readonly SSTableManager _sstableManager;
-        private readonly CompactionManager _compactionManager;
-        private readonly VersionManager _versionManager;
-
-        private readonly SemaphoreSlim _writeSemaphore;
-        private long _sequenceNumber = 0;
-
-        private readonly CancellationTokenSource _shutdownCts = new();
-        private readonly Task _flushTask;
-        private readonly Task _compactionTask;
-
-        private readonly MetricsCollector _metrics;
-
-        private volatile bool _isDisposed = false;
+        private readonly string _directory;
+        private MemTable _memTable;
+        private readonly Wal _wal;
+        private readonly TableCache _tableCache;
+        private readonly VersionSet _versions;
+        private readonly SemaphoreSlim _writeLock;
+        private readonly ManualResetEventSlim _bgWorkEvent = new();
+        private readonly CancellationTokenSource _cts = new();
+        private long _logNumber;
+        private long _sequence;
+        private volatile bool _disposed;
+        private Task _bgTask;
+        private bool _started = false;
 
         public MiniDB(MiniDBOptions options, Logger logger)
         {
-            _options = options ?? throw new ArgumentNullException(nameof(options));
-            _logger = logger ?? throw new ArgumentNullException(nameof(logger));
+            _options = options ?? new MiniDBOptions();
+            _logger = logger ?? new Logger();
+            _directory = Path.GetFullPath(_options.DataDirectory);
+            Directory.CreateDirectory(_directory);
+            Directory.CreateDirectory(Path.Combine(_directory, "wal"));
+            Directory.CreateDirectory(Path.Combine(_directory, "sst"));
 
-            ValidateOptions();
-            EnsureDirectoryStructure();
-
-            _metrics = new MetricsCollector();
-            _versionManager = new VersionManager(_options.DataDirectory, _logger);
-            _wal = new WriteAheadLog(Path.Combine(_options.DataDirectory, "wal"), _logger);
+            _writeLock = new SemaphoreSlim(_options.MaxConcurrentWrites, _options.MaxConcurrentWrites);
+            _tableCache = new TableCache(_options, _directory);
+            _versions = new VersionSet(_directory, _options, _tableCache, _logger);
             _memTable = new MemTable(_options.MemTableSizeBytes);
-            _sstableManager = new SSTableManager(_options.DataDirectory, _versionManager, _logger);
-            _compactionManager = new CompactionManager(_sstableManager, _versionManager, _options, _logger);
-
-            _writeSemaphore = new SemaphoreSlim(_options.MaxConcurrentWrites);
-
-            _flushTask = Task.Run(() => BackgroundFlushLoop(_shutdownCts.Token));
-            _compactionTask = Task.Run(() => BackgroundCompactionLoop(_shutdownCts.Token));
+            _wal = new Wal(Path.Combine(_directory, "wal"), ref _logNumber);
         }
 
-        public async Task StartAsync(CancellationToken cancellationToken = default)
+        public async Task StartAsync()
         {
-            _logger.Log("🚀 Starting MiniDB storage engine...");
+            if (_started) return;
 
-            await RecoverFromWALAsync(cancellationToken);
-            await _sstableManager.LoadExistingSSTables(cancellationToken);
+            _logger.Log("Starting MiniDB...");
 
-            _logger.Log($"✅ MiniDB started. Loaded {_sstableManager.GetSSTableCount()} SSTables.");
-        }
+            var recovered = _wal.Recover();
+            _sequence = recovered.Item1;
 
-        public async Task StopAsync(CancellationToken cancellationToken = default)
-        {
-            _logger.Log("🛑 Stopping MiniDB storage engine...");
-
-            _shutdownCts.Cancel();
-            try
+            foreach (var entry in recovered.Item2)
             {
-                await Task.WhenAll(_flushTask, _compactionTask).ConfigureAwait(false);
+                _memTable.Add(entry.Sequence, entry.Key, entry.Value, entry.Type);
             }
-            catch (OperationCanceledException) { }
 
-            if (!_memTable.IsEmpty())
-            {
-                await FlushMemTableAsync(cancellationToken);
-            }
-            await _wal.SyncAsync(cancellationToken);
+            _versions.Load();
+            _started = true;
+            _bgTask = Task.Run(BackgroundLoop);
 
-            _logger.Log("✅ MiniDB stopped gracefully.");
+            _logger.Log("MiniDB Started.");
         }
 
-        #region Public API
-
-        /// <summary>
-        /// Insert a new key-value pair. Fails if key already exists.
-        /// </summary>
-        public async Task InsertAsync<T>(string key, T value, CancellationToken cancellationToken = default)
+        public async Task StopAsync()
         {
+            if (!_started) return;
+
+            _cts.Cancel();
+            _bgWorkEvent.Set();
+
+            if (_bgTask != null)
+            {
+                await _bgTask;
+            }
+
+            if (_memTable.ApproximateMemoryUsage() > 0)
+            {
+                await CompactMemTable();
+            }
+
+            _wal.Dispose();
+            _tableCache.Dispose();
+            _bgWorkEvent.Dispose();
+            _writeLock.Dispose();
+            _cts.Dispose();
+
+            _disposed = true;
+            _started = false;
+            _logger.Log("💽 MiniDB Stopped.");
+        }
+
+        public async Task PutAsync(string key, byte[] value)
+        {
+            CheckDisposed();
             ValidateKey(key);
-            ThrowIfDisposed();
+            if (value == null) throw new ArgumentNullException(nameof(value));
 
-            var sw = Stopwatch.StartNew();
-            await _writeSemaphore.WaitAsync(cancellationToken);
-
+            await _writeLock.WaitAsync();
             try
             {
-                var existing = await GetInternalAsync(key, cancellationToken);
-                if (existing != null && !existing.IsDeleted)
-                {
-                    throw new MiniDBException($"Key '{key}' already exists. Use UpsertAsync to update.");
-                }
-
-                await WriteInternalAsync(key, value, WriteType.Insert, cancellationToken);
-
-                _metrics.RecordWrite(sw.Elapsed);
+                var seq = Interlocked.Increment(ref _sequence);
+                var batch = new WriteBatch { Sequence = seq };
+                batch.Put(key, value);
+                await WriteBatchInternal(batch);
             }
             finally
             {
-                _writeSemaphore.Release();
+                _writeLock.Release();
             }
         }
 
-        /// <summary>
-        /// Insert or update a key-value pair.
-        /// </summary>
-        public async Task UpsertAsync<T>(string key, T value, CancellationToken cancellationToken = default)
+        public async Task DeleteAsync(string key)
         {
+            CheckDisposed();
             ValidateKey(key);
-            ThrowIfDisposed();
 
-            var sw = Stopwatch.StartNew();
-            await _writeSemaphore.WaitAsync(cancellationToken);
-
+            await _writeLock.WaitAsync();
             try
             {
-                await WriteInternalAsync(key, value, WriteType.Upsert, cancellationToken);
-                _metrics.RecordWrite(sw.Elapsed);
+                var seq = Interlocked.Increment(ref _sequence);
+                var batch = new WriteBatch { Sequence = seq };
+                batch.Delete(key);
+                await WriteBatchInternal(batch);
             }
             finally
             {
-                _writeSemaphore.Release();
+                _writeLock.Release();
             }
         }
 
-        /// <summary>
-        /// Get value by key. Returns default(T) if not found.
-        /// This operation is lock-free and never blocks writers.
-        /// </summary>
-        public async Task<T?> GetAsync<T>(string key, CancellationToken cancellationToken = default)
+        public async Task<byte[]> GetAsync(string key)
         {
+            CheckDisposed();
             ValidateKey(key);
-            ThrowIfDisposed();
 
-            var sw = Stopwatch.StartNew();
-
-            try
+            var memValue = _memTable.Get(key);
+            if (memValue != null)
             {
-                var entry = await GetInternalAsync(key, cancellationToken);
+                if (memValue.Type == EntryType.Delete) return null;
+                return memValue.Value;
+            }
 
-                if (entry == null || entry.IsDeleted)
+            var immValue = _versions.GetImmutable(key);
+            if (immValue != null)
+            {
+                if (immValue.Type == EntryType.Delete) return null;
+                return immValue.Value;
+            }
+
+            return await _versions.GetAsync(key);
+        }
+
+        private async Task WriteBatchInternal(WriteBatch batch)
+        {
+            _wal.AddRecord(batch);
+            foreach (var entry in batch.Entries)
+            {
+                _memTable.Add(batch.Sequence, entry.Key, entry.Value, entry.Type);
+            }
+
+            if (_memTable.ApproximateMemoryUsage() >= _options.MemTableSizeBytes)
+            {
+                _bgWorkEvent.Set();
+            }
+        }
+
+        private async Task BackgroundLoop()
+        {
+            while (!_cts.IsCancellationRequested)
+            {
+                _bgWorkEvent.Wait(100);
+                _bgWorkEvent.Reset();
+
+                if (_disposed) break;
+
+                if (_memTable.ApproximateMemoryUsage() >= _options.MemTableSizeBytes)
                 {
-                    _metrics.RecordRead(sw.Elapsed, false);
-                    return default;
+                    await CompactMemTable();
                 }
 
-                var result = Deserialize<T>(entry.Value);
-                _metrics.RecordRead(sw.Elapsed, true);
-                return result;
-            }
-            catch (Exception ex)
-            {
-                _logger.LogError($"Error reading key '{key}': {ex.Message}");
-                throw;
-            }
-        }
-
-        /// <summary>
-        /// Delete a key. This is a tombstone operation (soft delete).
-        /// </summary>
-        public async Task DeleteAsync(string key, CancellationToken cancellationToken = default)
-        {
-            ValidateKey(key);
-            ThrowIfDisposed();
-
-            var sw = Stopwatch.StartNew();
-            await _writeSemaphore.WaitAsync(cancellationToken);
-
-            try
-            {
-                await WriteInternalAsync<object>(key, null, WriteType.Delete, cancellationToken);
-                _metrics.RecordWrite(sw.Elapsed);
-            }
-            finally
-            {
-                _writeSemaphore.Release();
-            }
-        }
-
-        /// <summary>
-        /// Check if key exists (not deleted).
-        /// </summary>
-        public async Task<bool> ContainsKeyAsync(string key, CancellationToken cancellationToken = default)
-        {
-            var entry = await GetInternalAsync(key, cancellationToken);
-            return entry != null && !entry.IsDeleted;
-        }
-
-        /// <summary>
-        /// Get all keys (expensive operation - scans all SSTables).
-        /// </summary>
-        public async Task<IEnumerable<string>> GetAllKeysAsync(CancellationToken cancellationToken = default)
-        {
-            var keys = new HashSet<string>();
-
-            foreach (var key in _memTable.GetAllKeys())
-            {
-                var entry = _memTable.Get(key);
-                if (entry != null && !entry.IsDeleted)
+                if (_versions.NeedsCompaction())
                 {
-                    keys.Add(key);
+                    await _versions.DoCompaction();
                 }
             }
-
-            var snapshot = _versionManager.GetCurrentSnapshot();
-            foreach (var sstable in snapshot.SSTables)
-            {
-                await foreach (var entry in sstable.ScanAsync(cancellationToken))
-                {
-                    if (!entry.IsDeleted)
-                    {
-                        keys.Add(entry.Key);
-                    }
-                    else
-                    {
-                        keys.Remove(entry.Key);
-                    }
-                }
-            }
-
-            return keys;
         }
 
-        /// <summary>
-        /// Batch write operations for better performance.
-        /// All operations are atomic - either all succeed or all fail.
-        /// </summary>
-        public async Task BatchWriteAsync(IEnumerable<BatchOperation> operations, CancellationToken cancellationToken = default)
+        private async Task CompactMemTable()
         {
-            var opsList = operations.ToList();
-            if (opsList.Count == 0) return;
+            var imm = _memTable;
+            _memTable = new MemTable(_options.MemTableSizeBytes);
 
-            ThrowIfDisposed();
-
-            var sw = Stopwatch.StartNew();
-            await _writeSemaphore.WaitAsync(cancellationToken);
-
-            try
+            var meta = new FileMetaData
             {
-                var walBatch = new List<WALEntry>();
-
-                foreach (var op in opsList)
-                {
-                    ValidateKey(op.Key);
-
-                    var seqNum = Interlocked.Increment(ref _sequenceNumber);
-                    byte[]? valueBytes = null;
-                    string? typeName = null;
-
-                    if (op.Type != BatchOperationType.Delete && op.Data != null)
-                    {
-                        valueBytes = Serialize(op.Data);
-                        typeName = op.Data.GetType().AssemblyQualifiedName;
-                    }
-
-                    var walEntry = new WALEntry
-                    {
-                        SequenceNumber = seqNum,
-                        Key = op.Key,
-                        Value = valueBytes,
-                        TypeName = typeName,
-                        IsDeleted = op.Type == BatchOperationType.Delete,
-                        Timestamp = DateTime.UtcNow
-                    };
-
-                    walBatch.Add(walEntry);
-                }
-
-                await _wal.WriteBatchAsync(walBatch, cancellationToken);
-                foreach (var walEntry in walBatch)
-                {
-                    var entry = new DataEntry
-                    {
-                        Key = walEntry.Key,
-                        Value = walEntry.Value,
-                        TypeName = walEntry.TypeName,
-                        SequenceNumber = walEntry.SequenceNumber,
-                        IsDeleted = walEntry.IsDeleted,
-                        Timestamp = walEntry.Timestamp
-                    };
-
-                    _memTable.Put(entry);
-                }
-
-                if (_memTable.ShouldFlush())
-                {
-                    _ = Task.Run(() => FlushMemTableAsync(CancellationToken.None));
-                }
-
-                _metrics.RecordBatchWrite(opsList.Count, sw.Elapsed);
-            }
-            finally
-            {
-                _writeSemaphore.Release();
-            }
-        }
-
-        /// <summary>
-        /// Get database statistics.
-        /// </summary>
-        public async Task<DatabaseStats> GetStatsAsync(CancellationToken cancellationToken = default)
-        {
-            var snapshot = _versionManager.GetCurrentSnapshot();
-
-            return new DatabaseStats
-            {
-                TotalEntries = _memTable.Count + snapshot.SSTables.Sum(s => s.EntryCount),
-                MemTableEntries = _memTable.Count,
-                MemTableSizeBytes = _memTable.SizeBytes,
-                SSTableCount = snapshot.SSTables.Count,
-                TotalSizeBytes = snapshot.SSTables.Sum(s => s.FileSizeBytes) + _memTable.SizeBytes,
-                TotalOperations = _metrics.TotalOperations,
-                ReadOperations = _metrics.ReadOperations,
-                WriteOperations = _metrics.WriteOperations,
-                AverageReadLatency = _metrics.AverageReadLatency,
-                AverageWriteLatency = _metrics.AverageWriteLatency,
-                CacheHitRate = _metrics.CacheHitRate,
-                LastCompactionTime = _compactionManager.LastCompactionTime,
-                WALSizeBytes = _wal.SizeBytes
-            };
-        }
-
-        /// <summary>
-        /// Force a manual compaction. Normally handled by background thread.
-        /// </summary>
-        public async Task CompactAsync(CancellationToken cancellationToken = default)
-        {
-            _logger.Log("🗜️ Starting manual compaction...");
-            await _compactionManager.CompactAsync(cancellationToken);
-            _logger.Log("✅ Manual compaction completed.");
-        }
-
-        #endregion
-
-        #region Internal Write/Read Logic
-
-        private async Task WriteInternalAsync<T>(string key, T? value, WriteType writeType, CancellationToken cancellationToken)
-        {
-            var seqNum = Interlocked.Increment(ref _sequenceNumber);
-
-            byte[]? valueBytes = null;
-            string? typeName = null;
-
-            if (writeType != WriteType.Delete && value != null)
-            {
-                valueBytes = Serialize(value);
-                typeName = typeof(T).AssemblyQualifiedName;
-            }
-
-            var walEntry = new WALEntry
-            {
-                SequenceNumber = seqNum,
-                Key = key,
-                Value = valueBytes,
-                TypeName = typeName,
-                IsDeleted = writeType == WriteType.Delete,
-                Timestamp = DateTime.UtcNow
+                Number = _versions.NewFileNumber(),
+                Size = 0,
+                Smallest = new InternalKey(""),
+                Largest = new InternalKey("")
             };
 
-            await _wal.WriteAsync(walEntry, cancellationToken);
+            var path = Path.Combine(_directory, "sst", $"{meta.Number}.sst");
+            var file = new SSTableWriter(path, _options);
+            var iter = imm.NewIterator();
+            iter.SeekToFirst();
 
-            var entry = new DataEntry
+            bool first = true;
+            while (iter.Valid())
             {
-                Key = key,
-                Value = valueBytes,
-                TypeName = typeName,
-                SequenceNumber = seqNum,
-                IsDeleted = writeType == WriteType.Delete,
-                Timestamp = DateTime.UtcNow
-            };
+                var key = iter.Key();
+                var val = iter.Value();
+                var type = iter.Type();
 
-            _memTable.Put(entry);
+                if (first)
+                {
+                    meta.Smallest = new InternalKey(key);
+                    meta.Largest = new InternalKey(key);
+                    first = false;
+                }
+                else
+                {
+                    if (string.CompareOrdinal(key, meta.Smallest.UserKey) < 0) meta.Smallest = new InternalKey(key);
+                    if (string.CompareOrdinal(key, meta.Largest.UserKey) > 0) meta.Largest = new InternalKey(key);
+                }
 
-            if (_memTable.ShouldFlush())
-            {
-                _ = Task.Run(() => FlushMemTableAsync(CancellationToken.None));
+                meta.Size += file.Add(key, type, val);
+                iter.Next();
             }
+            file.Finish();
+
+            _versions.LogAndApply(0, meta);
+            _versions.SetImmutable(imm.GetStore());
+            _wal.DeleteLog(_logNumber);
         }
 
-        private async Task<DataEntry?> GetInternalAsync(string key, CancellationToken cancellationToken)
+        private void ValidateKey(string key)
         {
-            var entry = _memTable.Get(key);
-            if (entry != null)
+            if (string.IsNullOrEmpty(key)) throw new ArgumentException("Key cannot be empty");
+            if (Encoding.UTF8.GetByteCount(key) > 512) throw new ArgumentException("Key too long");
+        }
+
+        private void CheckDisposed()
+        {
+            if (_disposed) throw new ObjectDisposedException(nameof(MiniDB));
+        }
+
+        public void Dispose()
+        {
+            if (_disposed) return;
+            StopAsync().GetAwaiter().GetResult();
+        }
+    }
+
+    internal class MemTable
+    {
+        private readonly ConcurrentDictionary<string, MemEntry> _store;
+        private readonly long _maxSize;
+        private long _currentSize;
+
+        public MemTable(long maxSizeBytes)
+        {
+            _maxSize = maxSizeBytes;
+            _store = new ConcurrentDictionary<string, MemEntry>();
+        }
+
+        public void Add(long sequence, string key, byte[] value, EntryType type)
+        {
+            var size = key.Length * 2 + (value?.Length ?? 0) + 16;
+            var entry = new MemEntry(sequence, key, value, type);
+            _store.AddOrUpdate(key, entry, (k, v) =>
             {
+                Interlocked.Add(ref _currentSize, -EstimateSize(v));
                 return entry;
+            });
+            Interlocked.Add(ref _currentSize, size);
+        }
+
+        public MemEntry Get(string key)
+        {
+            return _store.TryGetValue(key, out var entry) ? entry : null;
+        }
+
+        public long ApproximateMemoryUsage() => Interlocked.Read(ref _currentSize);
+
+        public MemIterator NewIterator() => new MemIterator(_store.Values.OrderByDescending(x => x.Sequence));
+
+        public ConcurrentDictionary<string, MemEntry> GetStore() => _store;
+
+        private long EstimateSize(MemEntry e) => e.Key.Length * 2 + (e.Value?.Length ?? 0) + 16;
+    }
+
+    internal class MemEntry
+    {
+        public long Sequence { get; }
+        public string Key { get; }
+        public byte[] Value { get; }
+        public EntryType Type { get; }
+
+        public MemEntry(long seq, string key, byte[] value, EntryType type)
+        {
+            Sequence = seq;
+            Key = key;
+            Value = value;
+            Type = type;
+        }
+    }
+
+    internal class MemIterator
+    {
+        private readonly List<MemEntry> _entries;
+        private int _index;
+
+        public MemIterator(IEnumerable<MemEntry> entries)
+        {
+            _entries = entries.ToList();
+        }
+
+        public void SeekToFirst() => _index = 0;
+        public void Next() => _index++;
+        public bool Valid() => _index >= 0 && _index < _entries.Count;
+        public string Key() => _entries[_index].Key;
+        public byte[] Value() => _entries[_index].Value;
+        public EntryType Type() => _entries[_index].Type;
+    }
+
+    internal class Wal
+    {
+        private readonly string _dir;
+        private FileStream _writer;
+        private readonly object _sync = new();
+
+        public Wal(string dir, ref long logNumber)
+        {
+            _dir = dir;
+            var files = Directory.GetFiles(_dir, "*.log").OrderBy(Path.GetFileNameWithoutExtension).ToList();
+            if (files.Any())
+            {
+                var last = files.Last();
+                logNumber = long.Parse(Path.GetFileNameWithoutExtension(last));
+                _writer = new FileStream(Path.Combine(_dir, $"{logNumber + 1}.log"), FileMode.Create, FileAccess.Write, FileShare.None, 4096, FileOptions.WriteThrough);
+                logNumber++;
+            }
+            else
+            {
+                logNumber = 1;
+                _writer = new FileStream(Path.Combine(_dir, $"{logNumber}.log"), FileMode.Create, FileAccess.Write, FileShare.None, 4096, FileOptions.WriteThrough);
+            }
+        }
+
+        public void AddRecord(WriteBatch batch)
+        {
+            byte[] data;
+            using (var ms = new MemoryStream())
+            using (var bw = new BinaryWriter(ms))
+            {
+                bw.Write(batch.Sequence);
+                bw.Write(batch.Entries.Count);
+                foreach (var e in batch.Entries)
+                {
+                    bw.Write((byte)e.Type);
+                    bw.Write(e.Key);
+                    bw.Write(e.Value?.Length ?? 0);
+                    if (e.Value != null) bw.Write(e.Value);
+                }
+                data = ms.ToArray();
             }
 
-            var snapshot = _versionManager.GetCurrentSnapshot();
-
-            foreach (var sstable in snapshot.SSTables.OrderByDescending(s => s.Level).ThenByDescending(s => s.CreationTime))
+            lock (_sync)
             {
-                if (!sstable.MightContain(key))
-                {
-                    continue;
-                }
+                var len = data.Length;
+                _writer.Write(BitConverter.GetBytes(len), 0, 4);
+                _writer.Write(data, 0, len);
+            }
+        }
 
-                entry = await sstable.GetAsync(key, cancellationToken);
-                if (entry != null)
+        public (long, List<MemEntry>) Recover()
+        {
+            var files = Directory.GetFiles(_dir, "*.log").OrderBy(Path.GetFileNameWithoutExtension).ToArray();
+            long maxSeq = 0;
+            var entries = new List<MemEntry>();
+
+            foreach (var f in files)
+            {
+                try
                 {
-                    return entry;
+                    using var fs = new FileStream(f, FileMode.Open, FileAccess.Read, FileShare.ReadWrite, 4096, FileOptions.SequentialScan);
+                    using var br = new BinaryReader(fs);
+
+                    while (fs.Position < fs.Length)
+                    {
+                        var lenBytes = br.ReadBytes(4);
+                        if (lenBytes.Length < 4) break;
+                        var len = BitConverter.ToInt32(lenBytes, 0);
+                        if (len <= 0 || len > fs.Length - fs.Position) break;
+
+                        var data = br.ReadBytes(len);
+
+                        using var ms = new MemoryStream(data);
+                        using var batchBr = new BinaryReader(ms);
+
+                        var seq = batchBr.ReadInt64();
+                        if (seq > maxSeq) maxSeq = seq;
+
+                        var count = batchBr.ReadInt32();
+                        for (int i = 0; i < count; i++)
+                        {
+                            var type = (EntryType)batchBr.ReadByte();
+                            var key = batchBr.ReadString();
+                            var valLen = batchBr.ReadInt32();
+                            byte[] val = valLen > 0 ? batchBr.ReadBytes(valLen) : null;
+
+                            entries.Add(new MemEntry(seq, key, val, type));
+                        }
+                    }
                 }
+                catch { }
+            }
+
+            return (maxSeq, entries);
+        }
+
+        public void DeleteLog(long number)
+        {
+            try
+            {
+                File.Delete(Path.Combine(_dir, $"{number}.log"));
+            }
+            catch { }
+        }
+
+        public void Dispose()
+        {
+            _writer?.Dispose();
+        }
+    }
+
+    internal enum EntryType { Value, Delete }
+
+    internal class WriteBatch
+    {
+        public long Sequence { get; set; }
+        public List<BatchEntry> Entries { get; } = new();
+
+        public void Put(string k, byte[] v) => Entries.Add(new BatchEntry { Type = EntryType.Value, Key = k, Value = v });
+        public void Delete(string k) => Entries.Add(new BatchEntry { Type = EntryType.Delete, Key = k, Value = null });
+    }
+
+    internal class BatchEntry
+    {
+        public EntryType Type { get; set; }
+        public string Key { get; set; }
+        public byte[] Value { get; set; }
+    }
+
+    internal class SSTableWriter
+    {
+        private readonly FileStream _file;
+        private readonly MiniDBOptions _options;
+        private readonly List<BlockBuilder> _blocks;
+        private readonly BlockBuilder _indexBlock;
+        private FilterBlock _filterBlock;
+        private long _offset;
+
+        public SSTableWriter(string path, MiniDBOptions options)
+        {
+            _options = options;
+            _file = new FileStream(path, FileMode.Create, FileAccess.Write, FileShare.None, 65536, FileOptions.WriteThrough);
+            _blocks = new List<BlockBuilder>();
+            _indexBlock = new BlockBuilder(options);
+            _filterBlock = new FilterBlock();
+            _offset = 0;
+        }
+
+        public int Add(string key, EntryType type, byte[] value)
+        {
+            if (_blocks.Count == 0 || _blocks.Last().EstimateSize() >= _options.BlockSizeBytes)
+            {
+                if (_blocks.Count > 0)
+                {
+                    FlushBlock();
+                }
+                _blocks.Add(new BlockBuilder(_options));
+            }
+
+            var block = _blocks.Last();
+            block.Add(key, type, value);
+            _filterBlock.AddKey(key);
+            return (int)(block.EstimateSize());
+        }
+
+        private void FlushBlock()
+        {
+            var block = _blocks.Last();
+            var data = block.Finish();
+
+            var handle = new BlockHandle { Offset = _offset, Size = data.Length };
+            _indexBlock.Add(block.LastKey(), EntryType.Value, handle.Encode());
+
+            _file.Write(data, 0, data.Length);
+            _offset += data.Length;
+        }
+
+        public void Finish()
+        {
+            if (_blocks.Count > 0) FlushBlock();
+
+            var filterData = _filterBlock.Generate();
+            var indexData = _indexBlock.Finish();
+            var footer = new Footer { IndexOffset = _offset, IndexSize = indexData.Length, FilterOffset = _offset + indexData.Length, FilterSize = filterData.Length };
+
+            _file.Write(indexData, 0, indexData.Length);
+            _file.Write(filterData, 0, filterData.Length);
+            var footerBytes = footer.Encode();
+            _file.Write(footerBytes, 0, footerBytes.Length);
+            _file.Flush(true);
+        }
+
+        public void Dispose() => _file.Dispose();
+    }
+
+    internal class SSTableReader
+    {
+        private readonly string _file;
+        private readonly FileStream _fs;
+        private readonly Footer _footer;
+        private readonly TableCache _cache;
+        private readonly FilterBlock _filter;
+        private readonly long _fileSize;
+        private readonly MiniDBOptions _options;
+
+        public SSTableReader(string file, TableCache cache, MiniDBOptions options)
+        {
+            _file = file;
+            _fs = new FileStream(file, FileMode.Open, FileAccess.Read, FileShare.Read, 65536, FileOptions.SequentialScan);
+            _fileSize = _fs.Length;
+            _cache = cache;
+            _options = options;
+
+            var footerBytes = new byte[Footer.Length];
+            _fs.Seek(-Footer.Length, SeekOrigin.End);
+            _fs.Read(footerBytes, 0, Footer.Length);
+            _footer = Footer.Decode(footerBytes);
+
+            _fs.Seek(_footer.FilterOffset, SeekOrigin.Begin);
+            var filterBytes = new byte[_footer.FilterSize];
+            _fs.Read(filterBytes, 0, filterBytes.Length);
+            _filter = new FilterBlock(filterBytes);
+        }
+
+        public async Task<byte[]> GetAsync(string key)
+        {
+            if (!_filter.KeyMayMatch(key)) return null;
+
+            var indexBlock = await _cache.GetBlock(_file, _footer.IndexOffset, _footer.IndexSize);
+            var indexIter = new BlockIterator(indexBlock, _options);
+            indexIter.Seek(key);
+
+            if (!indexIter.Valid()) return null;
+
+            var handle = BlockHandle.Decode(indexIter.Value());
+            var dataBlock = await _cache.GetBlock(_file, handle.Offset, handle.Size);
+            var dataIter = new BlockIterator(dataBlock, _options);
+            dataIter.Seek(key);
+
+            if (dataIter.Valid() && dataIter.Key() == key)
+            {
+                if (dataIter.Type() == EntryType.Delete) return null;
+                return dataIter.Value();
             }
 
             return null;
         }
 
-        #endregion
+        public void Dispose() => _fs.Dispose();
+    }
 
-        #region Background Tasks
+    internal class TableCache
+    {
+        private readonly MiniDBOptions _options;
+        private readonly string _directory;
+        private readonly ConcurrentDictionary<long, SSTableReader> _tables;
+        private readonly ConcurrentDictionary<string, ConcurrentDictionary<long, CacheEntry>> _blockCache;
+        private long _cacheSize;
+        private readonly long _maxCacheSize;
 
-        private async Task BackgroundFlushLoop(CancellationToken cancellationToken)
+        public TableCache(MiniDBOptions options, string directory)
         {
-            _logger.Log("🔄 Background flush loop started.");
+            _options = options;
+            _directory = directory;
+            _tables = new ConcurrentDictionary<long, SSTableReader>();
+            _blockCache = new ConcurrentDictionary<string, ConcurrentDictionary<long, CacheEntry>>();
+            _maxCacheSize = options.BlockCacheSizeBytes;
+        }
 
-            while (!cancellationToken.IsCancellationRequested)
+        public async Task<byte[]> GetAsync(long fileNumber, string key)
+        {
+            var path = Path.Combine(_directory, "sst", $"{fileNumber}.sst");
+            var reader = GetTable(fileNumber);
+            return await reader.GetAsync(key);
+        }
+
+        public SSTableReader GetTable(long fileNumber)
+        {
+            var path = Path.Combine(_directory, "sst", $"{fileNumber}.sst");
+            return _tables.GetOrAdd(fileNumber, n => new SSTableReader(path, this, _options));
+        }
+
+        public async Task<byte[]> GetBlock(string file, long offset, int size)
+        {
+            var fileCache = _blockCache.GetOrAdd(file, f => new ConcurrentDictionary<long, CacheEntry>());
+
+            if (fileCache.TryGetValue(offset, out var entry))
             {
-                try
-                {
-                    await Task.Delay(_options.FlushCheckInterval, cancellationToken);
+                entry.LastAccess = DateTime.UtcNow.Ticks;
+                return entry.Data;
+            }
 
-                    if (_memTable.ShouldFlush())
+            byte[] data;
+            using (var fs = new FileStream(file, FileMode.Open, FileAccess.Read, FileShare.Read, 4096, FileOptions.SequentialScan))
+            {
+                fs.Seek(offset, SeekOrigin.Begin);
+                data = new byte[size];
+                await fs.ReadAsync(data, 0, size);
+            }
+
+            if (_options.EnableCompression)
+            {
+                data = Decompress(data);
+            }
+
+            var current = Interlocked.Add(ref _cacheSize, size);
+            if (current > _maxCacheSize)
+            {
+                Evict();
+            }
+
+            fileCache[offset] = new CacheEntry { Data = data, Size = size, LastAccess = DateTime.UtcNow.Ticks };
+            return data;
+        }
+
+        public void EvictFile(long fileNumber)
+        {
+            if (_tables.TryRemove(fileNumber, out var reader))
+            {
+                reader.Dispose();
+            }
+
+            var path = Path.Combine(_directory, "sst", $"{fileNumber}.sst");
+            if (_blockCache.TryRemove(path, out var fileCache))
+            {
+                long removedSize = 0;
+                foreach (var entry in fileCache.Values)
+                {
+                    removedSize += entry.Size;
+                }
+                Interlocked.Add(ref _cacheSize, -removedSize);
+            }
+        }
+
+        private void Evict()
+        {
+            var list = _blockCache.SelectMany(x => x.Value.Select(y => (File: x.Key, Offset: y.Key, Entry: y.Value))).ToList();
+            list.Sort((a, b) => a.Entry.LastAccess.CompareTo(b.Entry.LastAccess));
+
+            long removed = 0;
+            foreach (var item in list)
+            {
+                if (removed > _maxCacheSize / 4) break;
+                if (_blockCache.TryGetValue(item.File, out var fCache))
+                {
+                    if (fCache.TryRemove(item.Offset, out _))
                     {
-                        await FlushMemTableAsync(cancellationToken);
+                        removed += item.Entry.Size;
                     }
                 }
-                catch (OperationCanceledException)
-                {
-                    break;
-                }
-                catch (Exception ex)
-                {
-                    _logger.LogError($"Error in background flush loop: {ex.Message}");
-                }
             }
-
-            _logger.Log("🔄 Background flush loop stopped.");
+            Interlocked.Add(ref _cacheSize, -removed);
         }
 
-        private async Task BackgroundCompactionLoop(CancellationToken cancellationToken)
+        private byte[] Decompress(byte[] data)
         {
-            _logger.Log("🔄 Background compaction loop started.");
-
-            while (!cancellationToken.IsCancellationRequested)
+            try
             {
-                try
+                using var output = new MemoryStream();
+                using (var input = new MemoryStream(data))
+                using (var ds = new DeflateStream(input, CompressionMode.Decompress))
                 {
-                    await Task.Delay(_options.CompactionCheckInterval, cancellationToken);
-
-                    if (_compactionManager.ShouldCompact())
-                    {
-                        await _compactionManager.CompactAsync(cancellationToken);
-                    }
+                    ds.CopyTo(output);
                 }
-                catch (OperationCanceledException)
-                {
-                    break;
-                }
-                catch (Exception ex)
-                {
-                    _logger.LogError($"Error in background compaction loop: {ex.Message}");
-                }
+                return output.ToArray();
             }
-
-            _logger.Log("🔄 Background compaction loop stopped.");
-        }
-
-        private async Task FlushMemTableAsync(CancellationToken cancellationToken)
-        {
-            if (_memTable.IsEmpty()) return;
-
-            _logger.Log("💾 Flushing memtable to disk...");
-            var sw = Stopwatch.StartNew();
-
-            var entries = _memTable.GetAllEntries().OrderBy(e => e.Key).ToList();
-
-            if (entries.Count == 0) return;
-
-            var sstable = await _sstableManager.CreateSSTableAsync(entries, 0, cancellationToken);
-
-            _versionManager.AddSSTable(sstable);
-
-            _memTable.Clear();
-            await _wal.TruncateAsync(cancellationToken);
-
-            _logger.Log($"✅ Flushed {entries.Count} entries to SSTable in {sw.ElapsedMilliseconds}ms");
-        }
-
-        private async Task RecoverFromWALAsync(CancellationToken cancellationToken)
-        {
-            _logger.Log("🔧 Recovering from WAL...");
-
-            var entries = await _wal.RecoverAsync(cancellationToken);
-
-            if (entries.Count > 0)
+            catch
             {
-                foreach (var walEntry in entries)
-                {
-                    var entry = new DataEntry
-                    {
-                        Key = walEntry.Key,
-                        Value = walEntry.Value,
-                        TypeName = walEntry.TypeName,
-                        SequenceNumber = walEntry.SequenceNumber,
-                        IsDeleted = walEntry.IsDeleted,
-                        Timestamp = walEntry.Timestamp
-                    };
-
-                    _memTable.Put(entry);
-
-                    if (walEntry.SequenceNumber > _sequenceNumber)
-                    {
-                        _sequenceNumber = walEntry.SequenceNumber;
-                    }
-                }
-
-                _logger.Log($"✅ Recovered {entries.Count} entries from WAL.");
-            }
-            else
-            {
-                _logger.Log("✅ No WAL recovery needed.");
+                return data;
             }
         }
-
-        #endregion
-
-        #region Validation and Utilities
-
-        private void ValidateOptions()
-        {
-            if (string.IsNullOrWhiteSpace(_options.DataDirectory))
-                throw new ArgumentException("DataDirectory cannot be empty.");
-
-            if (_options.MemTableSizeBytes < 1024 * 1024)
-                throw new ArgumentException("MemTableSizeBytes must be at least 1MB.");
-
-            if (_options.MaxConcurrentWrites < 1)
-                throw new ArgumentException("MaxConcurrentWrites must be at least 1.");
-        }
-
-        private void EnsureDirectoryStructure()
-        {
-            Directory.CreateDirectory(_options.DataDirectory);
-            Directory.CreateDirectory(Path.Combine(_options.DataDirectory, "sstables"));
-            Directory.CreateDirectory(Path.Combine(_options.DataDirectory, "wal"));
-        }
-
-        private void ValidateKey(string key)
-        {
-            if (string.IsNullOrWhiteSpace(key))
-                throw new ArgumentException("Key cannot be null or whitespace.", nameof(key));
-
-            if (key.Length > 1024)
-                throw new ArgumentException("Key cannot exceed 1024 characters.", nameof(key));
-        }
-
-        private static byte[] Serialize<T>(T obj)
-        {
-            using var ms = new MemoryStream();
-            var serializer = new DataContractSerializer(typeof(T));
-            serializer.WriteObject(ms, obj);
-            return ms.ToArray();
-        }
-
-        private static T Deserialize<T>(byte[]? data)
-        {
-            if (data == null || data.Length == 0)
-                throw new InvalidOperationException("Cannot deserialize null or empty data.");
-
-            using var ms = new MemoryStream(data);
-            var serializer = new DataContractSerializer(typeof(T));
-            return (T)serializer.ReadObject(ms)!;
-        }
-
-        [MethodImpl(MethodImplOptions.AggressiveInlining)]
-        private void ThrowIfDisposed()
-        {
-            if (_isDisposed)
-                throw new ObjectDisposedException(nameof(MiniDB));
-        }
-
-        #endregion
-
-        #region IDisposable
 
         public void Dispose()
         {
-            if (_isDisposed) return;
-
-            _isDisposed = true;
-
-            try
-            {
-                StopAsync(CancellationToken.None).GetAwaiter().GetResult();
-            }
-            catch (Exception ex)
-            {
-                _logger.LogError($"Error during disposal: {ex.Message}");
-            }
-
-            _shutdownCts?.Dispose();
-            _writeSemaphore?.Dispose();
-            _wal?.Dispose();
-            _sstableManager?.Dispose();
+            foreach (var t in _tables.Values) t.Dispose();
         }
 
-        #endregion
+        private class CacheEntry
+        {
+            public byte[] Data;
+            public int Size;
+            public long LastAccess;
+        }
     }
 
-    #endregion
-
-    #region MemTable (In-Memory Sorted Structure)
-
-    /// <summary>
-    /// Thread-safe in-memory sorted data structure using lock striping.
-    /// Uses ConcurrentDictionary with manual size tracking.
-    /// </summary>
-    internal class MemTable
+    internal class BlockBuilder
     {
-        private readonly ConcurrentDictionary<string, DataEntry> _data = new();
-        private long _sizeBytes = 0;
-        private readonly long _maxSizeBytes;
-        private readonly object _sizeLock = new();
+        private readonly List<byte[]> _buffer;
+        private readonly List<int> _restarts;
+        private readonly MiniDBOptions _options;
+        private string _lastKey;
+        private int _counter;
+        private bool _finished;
 
-        public MemTable(long maxSizeBytes)
+        public BlockBuilder(MiniDBOptions options)
         {
-            _maxSizeBytes = maxSizeBytes;
+            _options = options;
+            _buffer = new List<byte[]>();
+            _restarts = new List<int>();
+            _counter = 0;
         }
 
-        public int Count => _data.Count;
-        public long SizeBytes => Interlocked.Read(ref _sizeBytes);
-
-        public void Put(DataEntry entry)
+        public void Add(string key, EntryType type, byte[] value)
         {
-            var entrySize = EstimateSize(entry);
-
-            _data.AddOrUpdate(entry.Key, entry, (k, old) =>
+            var shared = 0;
+            if (_counter > 0)
             {
-                var oldSize = EstimateSize(old);
-                Interlocked.Add(ref _sizeBytes, entrySize - oldSize);
-                return entry;
-            });
+                var minLen = Math.Min(_lastKey.Length, key.Length);
+                while (shared < minLen && _lastKey[shared] == key[shared]) shared++;
+            }
 
-            if (_data.TryGetValue(entry.Key, out var current) && current == entry)
+            var nonShared = key.Length - shared;
+            using var ms = new MemoryStream();
+            using var bw = new BinaryWriter(ms);
+
+            bw.Write((uint)shared);
+            bw.Write((uint)nonShared);
+            bw.Write((byte)type);
+            bw.Write((uint)(value?.Length ?? 0));
+
+            if (nonShared > 0)
             {
-                Interlocked.Add(ref _sizeBytes, entrySize);
+                var keyBytes = Encoding.UTF8.GetBytes(key.Substring(shared));
+                bw.Write(keyBytes);
+            }
+            if (value != null) bw.Write(value);
+
+            _buffer.Add(ms.ToArray());
+            _lastKey = key;
+            _counter++;
+
+            if (_counter >= 16)
+            {
+                _restarts.Add(_buffer.Sum(x => x.Length));
+                _counter = 0;
             }
         }
 
-        public DataEntry? Get(string key)
+        public int EstimateSize()
         {
-            return _data.TryGetValue(key, out var entry) ? entry : null;
-        }
-
-        public bool ShouldFlush()
-        {
-            return SizeBytes >= _maxSizeBytes;
-        }
-
-        public bool IsEmpty()
-        {
-            return _data.IsEmpty;
-        }
-
-        public IEnumerable<string> GetAllKeys()
-        {
-            return _data.Keys;
-        }
-
-        public IEnumerable<DataEntry> GetAllEntries()
-        {
-            return _data.Values;
-        }
-
-        public void Clear()
-        {
-            _data.Clear();
-            Interlocked.Exchange(ref _sizeBytes, 0);
-        }
-
-        private long EstimateSize(DataEntry entry)
-        {
-            long size = 0;
-            size += entry.Key.Length * 2;
-            size += entry.Value?.Length ?? 0;
-            size += entry.TypeName?.Length * 2 ?? 0;
-            size += 64;
+            var size = _buffer.Sum(x => x.Length);
+            size += _restarts.Count * 4;
+            size += 4;
             return size;
         }
-    }
 
-    #endregion
+        public string LastKey() => _lastKey;
 
-    #region SSTable (Sorted String Table)
-
-    /// <summary>
-    /// Immutable on-disk sorted data structure.
-    /// Format: [Header][Index Block][Data Blocks][Footer]
-    /// </summary>
-    internal class SSTable : IDisposable
-    {
-        private const uint MAGIC_NUMBER = 0x53535442;
-        private const int VERSION = 1;
-
-        public string FilePath { get; }
-        public int Level { get; }
-        public DateTime CreationTime { get; }
-        public long FileSizeBytes { get; private set; }
-        public int EntryCount { get; private set; }
-
-        private readonly BloomFilter _bloomFilter;
-        private readonly Dictionary<string, long> _index = new();
-        private readonly ReaderWriterLockSlim _lock = new();
-        private FileStream? _fileStream;
-        private bool _isDisposed = false;
-
-        private SSTable(string filePath, int level)
+        public byte[] Finish()
         {
-            FilePath = filePath;
-            Level = level;
-            CreationTime = DateTime.UtcNow;
-            _bloomFilter = new BloomFilter(10000, 0.01); 
-        }
+            if (_finished) throw new InvalidOperationException();
+            _finished = true;
 
-        /// <summary>
-        /// Create a new SSTable from sorted entries.
-        /// </summary>
-        public static async Task<SSTable> CreateAsync(string filePath, IEnumerable<DataEntry> sortedEntries, int level, CancellationToken cancellationToken)
-        {
-            var sstable = new SSTable(filePath, level);
+            using var ms = new MemoryStream();
+            using var bw = new BinaryWriter(ms);
 
-            using (var fs = new FileStream(filePath, FileMode.Create, FileAccess.Write, FileShare.None, 64 * 1024, useAsync: true))
-            {
-                fs.Seek(64, SeekOrigin.Begin);
+            foreach (var b in _buffer) bw.Write(b);
+            foreach (var r in _restarts) bw.Write(r);
+            bw.Write(_restarts.Count);
 
-                var entries = sortedEntries.ToList();
-                sstable.EntryCount = entries.Count;
+            var data = ms.ToArray();
 
-                foreach (var entry in entries)
-                {
-                    var offset = fs.Position;
-                    sstable._index[entry.Key] = offset;
-                    sstable._bloomFilter.Add(entry.Key);
-
-                    await WriteEntryAsync(fs, entry, cancellationToken);
-                }
-
-                var indexOffset = fs.Position;
-                await WriteIndexAsync(fs, sstable._index, cancellationToken);
-
-                var bloomOffset = fs.Position;
-                await sstable._bloomFilter.WriteToStreamAsync(fs, cancellationToken);
-
-                fs.Seek(0, SeekOrigin.Begin);
-                await WriteHeaderAsync(fs, sstable.EntryCount, indexOffset, bloomOffset, cancellationToken);
-
-                sstable.FileSizeBytes = fs.Length;
-            }
-
-            return sstable;
-        }
-
-        /// <summary>
-        /// Load existing SSTable from disk.
-        /// </summary>
-        public static async Task<SSTable> LoadAsync(string filePath, int level, CancellationToken cancellationToken)
-        {
-            var sstable = new SSTable(filePath, level);
-
-            using (var fs = new FileStream(filePath, FileMode.Open, FileAccess.Read, FileShare.Read, 64 * 1024, useAsync: true))
-            {
-                var (entryCount, indexOffset, bloomOffset) = await ReadHeaderAsync(fs, cancellationToken);
-                sstable.EntryCount = entryCount;
-                sstable.FileSizeBytes = fs.Length;
-
-                fs.Seek(indexOffset, SeekOrigin.Begin);
-                sstable._index.Clear();
-                var indexCount = await ReadInt32Async(fs, cancellationToken);
-
-                for (int i = 0; i < indexCount; i++)
-                {
-                    var key = await ReadStringAsync(fs, cancellationToken);
-                    var offset = await ReadInt64Async(fs, cancellationToken);
-                    sstable._index[key] = offset;
-                }
-
-                fs.Seek(bloomOffset, SeekOrigin.Begin);
-                await sstable._bloomFilter.ReadFromStreamAsync(fs, cancellationToken);
-            }
-
-            return sstable;
-        }
-
-        public bool MightContain(string key)
-        {
-            return _bloomFilter.MightContain(key);
-        }
-
-        public async Task<DataEntry?> GetAsync(string key, CancellationToken cancellationToken)
-        {
-            _lock.EnterReadLock();
-            try
-            {
-                if (!_index.TryGetValue(key, out var offset))
-                {
-                    return null;
-                }
-
-                if (_fileStream == null)
-                {
-                    _fileStream = new FileStream(FilePath, FileMode.Open, FileAccess.Read, FileShare.Read, 64 * 1024, useAsync: true);
-                }
-
-                _fileStream.Seek(offset, SeekOrigin.Begin);
-                return await ReadEntryAsync(_fileStream, cancellationToken);
-            }
-            finally
-            {
-                _lock.ExitReadLock();
-            }
-        }
-
-        public async IAsyncEnumerable<DataEntry> ScanAsync([EnumeratorCancellation] CancellationToken cancellationToken)
-        {
-            using var fs = new FileStream(FilePath, FileMode.Open, FileAccess.Read, FileShare.Read, 64 * 1024, useAsync: true);
-
-            var (entryCount, indexOffset, _) = await ReadHeaderAsync(fs, cancellationToken);
-
-            fs.Seek(64, SeekOrigin.Begin);
-
-            while (fs.Position < indexOffset)
-            {
-                var entry = await ReadEntryAsync(fs, cancellationToken);
-                if (entry != null)
-                {
-                    yield return entry;
-                }
-            }
-        }
-
-        #region Serialization
-
-        private static async Task WriteHeaderAsync(FileStream fs, int entryCount, long indexOffset, long bloomOffset, CancellationToken cancellationToken)
-        {
-            await WriteUInt32Async(fs, MAGIC_NUMBER, cancellationToken);
-            await WriteInt32Async(fs, VERSION, cancellationToken);
-            await WriteInt32Async(fs, entryCount, cancellationToken);
-            await WriteInt64Async(fs, indexOffset, cancellationToken);
-            await WriteInt64Async(fs, bloomOffset, cancellationToken);
-            await WriteInt64Async(fs, DateTime.UtcNow.Ticks, cancellationToken);
-        }
-
-        private static async Task<(int entryCount, long indexOffset, long bloomOffset)> ReadHeaderAsync(FileStream fs, CancellationToken cancellationToken)
-        {
-            var magic = await ReadUInt32Async(fs, cancellationToken);
-            if (magic != MAGIC_NUMBER)
-                throw new InvalidDataException("Invalid SSTable file format.");
-
-            var version = await ReadInt32Async(fs, cancellationToken);
-            if (version != VERSION)
-                throw new InvalidDataException($"Unsupported SSTable version: {version}");
-
-            var entryCount = await ReadInt32Async(fs, cancellationToken);
-            var indexOffset = await ReadInt64Async(fs, cancellationToken);
-            var bloomOffset = await ReadInt64Async(fs, cancellationToken);
-
-            return (entryCount, indexOffset, bloomOffset);
-        }
-
-        private static async Task WriteEntryAsync(FileStream fs, DataEntry entry, CancellationToken cancellationToken)
-        {
-            await WriteStringAsync(fs, entry.Key, cancellationToken);
-            await WriteInt64Async(fs, entry.SequenceNumber, cancellationToken);
-            await WriteInt64Async(fs, entry.Timestamp.Ticks, cancellationToken);
-            await WriteBoolAsync(fs, entry.IsDeleted, cancellationToken);
-
-            if (!entry.IsDeleted)
-            {
-                await WriteStringAsync(fs, entry.TypeName ?? string.Empty, cancellationToken);
-                await WriteBytesAsync(fs, entry.Value, cancellationToken);
-            }
-        }
-
-        private static async Task<DataEntry?> ReadEntryAsync(FileStream fs, CancellationToken cancellationToken)
-        {
-            try
-            {
-                var key = await ReadStringAsync(fs, cancellationToken);
-                var seqNum = await ReadInt64Async(fs, cancellationToken);
-                var ticks = await ReadInt64Async(fs, cancellationToken);
-                var isDeleted = await ReadBoolAsync(fs, cancellationToken);
-
-                string? typeName = null;
-                byte[]? value = null;
-
-                if (!isDeleted)
-                {
-                    typeName = await ReadStringAsync(fs, cancellationToken);
-                    value = await ReadBytesAsync(fs, cancellationToken);
-                }
-
-                return new DataEntry
-                {
-                    Key = key,
-                    SequenceNumber = seqNum,
-                    Timestamp = new DateTime(ticks, DateTimeKind.Utc),
-                    IsDeleted = isDeleted,
-                    TypeName = typeName,
-                    Value = value
-                };
-            }
-            catch (EndOfStreamException)
-            {
-                return null;
-            }
-        }
-
-        private static async Task WriteIndexAsync(FileStream fs, Dictionary<string, long> index, CancellationToken cancellationToken)
-        {
-            await WriteInt32Async(fs, index.Count, cancellationToken);
-
-            foreach (var kvp in index)
-            {
-                await WriteStringAsync(fs, kvp.Key, cancellationToken);
-                await WriteInt64Async(fs, kvp.Value, cancellationToken);
-            }
-        }
-
-        private static async Task WriteInt32Async(Stream stream, int value, CancellationToken cancellationToken)
-        {
-            var bytes = BitConverter.GetBytes(value);
-            await stream.WriteAsync(bytes, 0, bytes.Length, cancellationToken);
-        }
-
-        private static async Task<int> ReadInt32Async(Stream stream, CancellationToken cancellationToken)
-        {
-            var bytes = new byte[4];
-            await stream.ReadAsync(bytes, 0, 4, cancellationToken);
-            return BitConverter.ToInt32(bytes, 0);
-        }
-
-        private static async Task WriteUInt32Async(Stream stream, uint value, CancellationToken cancellationToken)
-        {
-            var bytes = BitConverter.GetBytes(value);
-            await stream.WriteAsync(bytes, 0, bytes.Length, cancellationToken);
-        }
-
-        private static async Task<uint> ReadUInt32Async(Stream stream, CancellationToken cancellationToken)
-        {
-            var bytes = new byte[4];
-            await stream.ReadAsync(bytes, 0, 4, cancellationToken);
-            return BitConverter.ToUInt32(bytes, 0);
-        }
-
-        private static async Task WriteInt64Async(Stream stream, long value, CancellationToken cancellationToken)
-        {
-            var bytes = BitConverter.GetBytes(value);
-            await stream.WriteAsync(bytes, 0, bytes.Length, cancellationToken);
-        }
-
-        private static async Task<long> ReadInt64Async(Stream stream, CancellationToken cancellationToken)
-        {
-            var bytes = new byte[8];
-            await stream.ReadAsync(bytes, 0, 8, cancellationToken);
-            return BitConverter.ToInt64(bytes, 0);
-        }
-
-        private static async Task WriteBoolAsync(Stream stream, bool value, CancellationToken cancellationToken)
-        {
-            await stream.WriteAsync(new byte[] { (byte)(value ? 1 : 0) }, 0, 1, cancellationToken);
-        }
-
-        private static async Task<bool> ReadBoolAsync(Stream stream, CancellationToken cancellationToken)
-        {
-            var bytes = new byte[1];
-            await stream.ReadAsync(bytes, 0, 1, cancellationToken);
-            return bytes[0] != 0;
-        }
-
-        private static async Task WriteStringAsync(Stream stream, string value, CancellationToken cancellationToken)
-        {
-            var bytes = Encoding.UTF8.GetBytes(value);
-            await WriteInt32Async(stream, bytes.Length, cancellationToken);
-            await stream.WriteAsync(bytes, 0, bytes.Length, cancellationToken);
-        }
-
-        private static async Task<string> ReadStringAsync(Stream stream, CancellationToken cancellationToken)
-        {
-            var length = await ReadInt32Async(stream, cancellationToken);
-            var bytes = new byte[length];
-            await stream.ReadAsync(bytes, 0, length, cancellationToken);
-            return Encoding.UTF8.GetString(bytes);
-        }
-
-        private static async Task WriteBytesAsync(Stream stream, byte[]? value, CancellationToken cancellationToken)
-        {
-            if (value == null)
-            {
-                await WriteInt32Async(stream, 0, cancellationToken);
-            }
-            else
-            {
-                await WriteInt32Async(stream, value.Length, cancellationToken);
-                await stream.WriteAsync(value, 0, value.Length, cancellationToken);
-            }
-        }
-
-        private static async Task<byte[]?> ReadBytesAsync(Stream stream, CancellationToken cancellationToken)
-        {
-            var length = await ReadInt32Async(stream, cancellationToken);
-            if (length == 0) return null;
-
-            var bytes = new byte[length];
-            await stream.ReadAsync(bytes, 0, length, cancellationToken);
-            return bytes;
-        }
-
-        #endregion
-
-        public void Dispose()
-        {
-            if (_isDisposed) return;
-            _isDisposed = true;
-
-            _fileStream?.Dispose();
-            _lock?.Dispose();
-        }
-    }
-
-    #endregion
-
-    #region Write-Ahead Log (WAL)
-
-    /// <summary>
-    /// Write-Ahead Log for crash recovery and durability.
-    /// All writes go to WAL first before being applied to memtable.
-    /// </summary>
-    internal class WriteAheadLog : IDisposable
-    {
-        private readonly string _directory;
-        private readonly Logger _logger;
-        private FileStream? _currentLog;
-        private readonly object _writeLock = new();
-        private long _currentLogNumber = 0;
-        private bool _isDisposed = false;
-
-        public long SizeBytes => _currentLog?.Length ?? 0;
-
-        public WriteAheadLog(string directory, Logger logger)
-        {
-            _directory = directory;
-            _logger = logger;
-
-            Directory.CreateDirectory(directory);
-            OpenNewLog();
-        }
-
-        public async Task WriteAsync(WALEntry entry, CancellationToken cancellationToken)
-        {
-            byte[] data = SerializeEntry(entry);
-
-            lock (_writeLock)
-            {
-                if (_currentLog == null)
-                    throw new InvalidOperationException("WAL is not initialized.");
-
-                var lengthBytes = BitConverter.GetBytes(data.Length);
-                _currentLog.Write(lengthBytes, 0, lengthBytes.Length);
-
-                _currentLog.Write(data, 0, data.Length);
-
-                _currentLog.Flush(flushToDisk: true);
-            }
-
-            await Task.CompletedTask;
-        }
-
-        public async Task WriteBatchAsync(List<WALEntry> entries, CancellationToken cancellationToken)
-        {
-            lock (_writeLock)
-            {
-                if (_currentLog == null)
-                    throw new InvalidOperationException("WAL is not initialized.");
-
-                foreach (var entry in entries)
-                {
-                    byte[] data = SerializeEntry(entry);
-
-                    var lengthBytes = BitConverter.GetBytes(data.Length);
-                    _currentLog.Write(lengthBytes, 0, lengthBytes.Length);
-                    _currentLog.Write(data, 0, data.Length);
-                }
-
-                _currentLog.Flush(flushToDisk: true);
-            }
-
-            await Task.CompletedTask;
-        }
-
-        public async Task<List<WALEntry>> RecoverAsync(CancellationToken cancellationToken)
-        {
-            var entries = new List<WALEntry>();
-
-            var logFiles = Directory.GetFiles(_directory, "*.wal").OrderBy(f => f).ToList();
-
-            foreach (var logFile in logFiles)
+            if (_options.EnableCompression)
             {
                 try
                 {
-                    using var fs = new FileStream(logFile, FileMode.Open, FileAccess.Read, FileShare.Read);
-
-                    while (fs.Position < fs.Length)
+                    using var outMs = new MemoryStream();
+                    using (var dStream = new DeflateStream(outMs, CompressionLevel.Optimal))
                     {
-                        try
-                        {
-                            byte[] lengthBytes = new byte[4];
-                            var bytesRead = await fs.ReadAsync(lengthBytes, 0, 4, cancellationToken);
-                            if (bytesRead < 4) break;
-
-                            int length = BitConverter.ToInt32(lengthBytes, 0);
-
-                            byte[] data = new byte[length];
-                            bytesRead = await fs.ReadAsync(data, 0, length, cancellationToken);
-                            if (bytesRead < length) break;
-
-                            var entry = DeserializeEntry(data);
-                            entries.Add(entry);
-                        }
-                        catch (Exception ex)
-                        {
-                            _logger.LogError($"Error reading WAL entry: {ex.Message}");
-                            break;
-                        }
+                        dStream.Write(data, 0, data.Length);
                     }
+                    return outMs.ToArray();
                 }
-                catch (Exception ex)
+                catch
                 {
-                    _logger.LogError($"Error reading WAL file {logFile}: {ex.Message}");
+                    return data;
                 }
             }
 
-            return entries;
+            return data;
         }
+    }
 
-        public async Task TruncateAsync(CancellationToken cancellationToken)
+    internal class BlockIterator
+    {
+        private readonly byte[] _data;
+        private readonly List<int> _restarts;
+        private int _offset;
+        private readonly MiniDBOptions _options;
+        private string _currentKey;
+        private byte[] _currentValue;
+        private EntryType _currentType;
+
+        public BlockIterator(byte[] data, MiniDBOptions options)
         {
-            lock (_writeLock)
+            _data = data;
+            _options = options;
+            var restartCount = BitConverter.ToInt32(data, data.Length - 4);
+            _restarts = new List<int>();
+            for (int i = 0; i < restartCount; i++)
             {
-                _currentLog?.Dispose();
-
-                var oldFiles = Directory.GetFiles(_directory, "*.wal");
-                foreach (var file in oldFiles)
-                {
-                    try
-                    {
-                        File.Delete(file);
-                    }
-                    catch (Exception ex)
-                    {
-                        _logger.LogError($"Error deleting WAL file {file}: {ex.Message}");
-                    }
-                }
-
-                OpenNewLog();
+                _restarts.Add(BitConverter.ToInt32(data, data.Length - 4 - (i + 1) * 4));
             }
-
-            await Task.CompletedTask;
         }
 
-        public async Task SyncAsync(CancellationToken cancellationToken)
+        public void Seek(string key)
         {
-            lock (_writeLock)
+            int left = 0;
+            int right = _restarts.Count - 1;
+
+            if (_restarts.Count == 0) return;
+
+            while (left < right)
             {
-                _currentLog?.Flush(flushToDisk: true);
-            }
-
-            await Task.CompletedTask;
-        }
-
-        private void OpenNewLog()
-        {
-            _currentLogNumber++;
-            var logPath = Path.Combine(_directory, $"{_currentLogNumber:D10}.wal");
-            _currentLog = new FileStream(logPath, FileMode.Create, FileAccess.Write, FileShare.Read, 64 * 1024);
-        }
-
-        private byte[] SerializeEntry(WALEntry entry)
-        {
-            using var ms = new MemoryStream();
-            using var writer = new BinaryWriter(ms);
-
-            writer.Write(entry.SequenceNumber);
-            writer.Write(entry.Key);
-            writer.Write(entry.IsDeleted);
-            writer.Write(entry.Timestamp.Ticks);
-
-            if (!entry.IsDeleted)
-            {
-                writer.Write(entry.TypeName ?? string.Empty);
-
-                if (entry.Value != null)
+                var mid = (left + right + 1) / 2;
+                _offset = _restarts[mid];
+                ParseEntryAt(_offset);
+                if (string.Compare(_currentKey, key, StringComparison.Ordinal) < 0)
                 {
-                    writer.Write(entry.Value.Length);
-                    writer.Write(entry.Value);
+                    left = mid;
                 }
                 else
                 {
-                    writer.Write(0);
+                    right = mid - 1;
                 }
             }
 
-            return ms.ToArray();
-        }
+            _offset = _restarts[left];
+            ParseEntryAt(_offset);
 
-        private WALEntry DeserializeEntry(byte[] data)
-        {
-            using var ms = new MemoryStream(data);
-            using var reader = new BinaryReader(ms);
-
-            var entry = new WALEntry
+            while (Valid() && string.Compare(_currentKey, key, StringComparison.Ordinal) < 0)
             {
-                SequenceNumber = reader.ReadInt64(),
-                Key = reader.ReadString(),
-                IsDeleted = reader.ReadBoolean(),
-                Timestamp = new DateTime(reader.ReadInt64(), DateTimeKind.Utc)
-            };
-
-            if (!entry.IsDeleted)
-            {
-                entry.TypeName = reader.ReadString();
-
-                int valueLength = reader.ReadInt32();
-                if (valueLength > 0)
-                {
-                    entry.Value = reader.ReadBytes(valueLength);
-                }
-            }
-
-            return entry;
-        }
-
-        public void Dispose()
-        {
-            if (_isDisposed) return;
-            _isDisposed = true;
-
-            lock (_writeLock)
-            {
-                _currentLog?.Dispose();
-            }
-        }
-    }
-
-    #endregion
-
-    #region SSTable Manager
-
-    /// <summary>
-    /// Manages all SSTables and their lifecycle.
-    /// </summary>
-    internal class SSTableManager : IDisposable
-    {
-        private readonly string _dataDirectory;
-        private readonly VersionManager _versionManager;
-        private readonly Logger _logger;
-        private long _nextSSTableId = 0;
-
-        public SSTableManager(string dataDirectory, VersionManager versionManager, Logger logger)
-        {
-            _dataDirectory = dataDirectory;
-            _versionManager = versionManager;
-            _logger = logger;
-        }
-
-        public async Task LoadExistingSSTables(CancellationToken cancellationToken)
-        {
-            var sstableDir = Path.Combine(_dataDirectory, "sstables");
-            var files = Directory.GetFiles(sstableDir, "*.sst").OrderBy(f => f).ToList();
-
-            foreach (var file in files)
-            {
-                try
-                {
-                    var fileName = Path.GetFileNameWithoutExtension(file);
-                    var parts = fileName.Split('_');
-
-                    if (parts.Length >= 2 && int.TryParse(parts[1], out int level))
-                    {
-                        var sstable = await SSTable.LoadAsync(file, level, cancellationToken);
-                        _versionManager.AddSSTable(sstable);
-
-                        if (parts.Length >= 1 && long.TryParse(parts[0], out long id))
-                        {
-                            if (id >= _nextSSTableId)
-                            {
-                                _nextSSTableId = id + 1;
-                            }
-                        }
-                    }
-                }
-                catch (Exception ex)
-                {
-                    _logger.LogError($"Error loading SSTable {file}: {ex.Message}");
-                }
+                Next();
             }
         }
 
-        public async Task<SSTable> CreateSSTableAsync(List<DataEntry> sortedEntries, int level, CancellationToken cancellationToken)
+        public bool Valid()
         {
-            var id = Interlocked.Increment(ref _nextSSTableId);
-            var fileName = $"{id:D10}_{level}.sst";
-            var filePath = Path.Combine(_dataDirectory, "sstables", fileName);
-
-            return await SSTable.CreateAsync(filePath, sortedEntries, level, cancellationToken);
+            return _offset >= 0 && _offset < _data.Length - 4 - (_restarts.Count * 4);
         }
 
-        public int GetSSTableCount()
+        public void Next()
         {
-            return _versionManager.GetCurrentSnapshot().SSTables.Count;
+            ParseEntryAt(_offset);
+            var shared = BitConverter.ToUInt32(_data, _offset);
+            var nonShared = BitConverter.ToUInt32(_data, _offset + 4);
+            var valLen = BitConverter.ToUInt32(_data, _offset + 9);
+            var entrySize = 13 + (int)nonShared + (int)valLen;
+            _offset += entrySize;
         }
 
-        public void Dispose()
+        public string Key() => _currentKey;
+        public byte[] Value() => _currentValue;
+        public EntryType Type() => _currentType;
+
+        private void ParseEntryAt(int offset)
         {
-
-        }
-    }
-
-    #endregion
-
-    #region Version Manager (MVCC)
-
-    /// <summary>
-    /// Manages versions of the database state for MVCC.
-    /// Allows lock-free reads while writes are happening.
-    /// </summary>
-    internal class VersionManager
-    {
-        private readonly string _dataDirectory;
-        private readonly Logger _logger;
-        private DatabaseSnapshot _currentSnapshot;
-        private readonly ReaderWriterLockSlim _lock = new();
-
-        public VersionManager(string dataDirectory, Logger logger)
-        {
-            _dataDirectory = dataDirectory;
-            _logger = logger;
-            _currentSnapshot = new DatabaseSnapshot { SSTables = new List<SSTable>() };
-        }
-
-        public DatabaseSnapshot GetCurrentSnapshot()
-        {
-            _lock.EnterReadLock();
-            try
+            if (offset < 0 || offset + 13 > _data.Length)
             {
-                return _currentSnapshot;
+                _currentKey = null;
+                return;
             }
-            finally
+            var shared = BitConverter.ToUInt32(_data, offset);
+            var nonShared = BitConverter.ToUInt32(_data, offset + 4);
+            _currentType = (EntryType)_data[offset + 8];
+            var valLen = BitConverter.ToUInt32(_data, offset + 9);
+
+            var keyOffset = offset + 13;
+            var valOffset = keyOffset + (int)nonShared;
+
+            if (keyOffset + (int)nonShared > _data.Length || valOffset + (int)valLen > _data.Length)
             {
-                _lock.ExitReadLock();
-            }
-        }
-
-        public void AddSSTable(SSTable sstable)
-        {
-            _lock.EnterWriteLock();
-            try
-            {
-                var newSSTables = new List<SSTable>(_currentSnapshot.SSTables) { sstable };
-                _currentSnapshot = new DatabaseSnapshot { SSTables = newSSTables };
-            }
-            finally
-            {
-                _lock.ExitWriteLock();
-            }
-        }
-
-        public void RemoveSSTables(List<SSTable> sstablesToRemove)
-        {
-            _lock.EnterWriteLock();
-            try
-            {
-                var newSSTables = _currentSnapshot.SSTables.Except(sstablesToRemove).ToList();
-                _currentSnapshot = new DatabaseSnapshot { SSTables = newSSTables };
-
-                foreach (var sstable in sstablesToRemove)
-                {
-                    try
-                    {
-                        sstable.Dispose();
-                        File.Delete(sstable.FilePath);
-                    }
-                    catch (Exception ex)
-                    {
-                        _logger.LogError($"Error deleting SSTable {sstable.FilePath}: {ex.Message}");
-                    }
-                }
-            }
-            finally
-            {
-                _lock.ExitWriteLock();
-            }
-        }
-
-        public void ReplaceSSTablesAtomic(List<SSTable> oldSSTables, List<SSTable> newSSTables)
-        {
-            _lock.EnterWriteLock();
-            try
-            {
-                var currentList = new List<SSTable>(_currentSnapshot.SSTables);
-
-                foreach (var old in oldSSTables)
-                {
-                    currentList.Remove(old);
-                }
-
-                currentList.AddRange(newSSTables);
-
-                _currentSnapshot = new DatabaseSnapshot { SSTables = currentList };
-
-                foreach (var old in oldSSTables)
-                {
-                    try
-                    {
-                        old.Dispose();
-                        File.Delete(old.FilePath);
-                    }
-                    catch (Exception ex)
-                    {
-                        _logger.LogError($"Error deleting old SSTable: {ex.Message}");
-                    }
-                }
-            }
-            finally
-            {
-                _lock.ExitWriteLock();
-            }
-        }
-    }
-
-    internal class DatabaseSnapshot
-    {
-        public List<SSTable> SSTables { get; set; } = new();
-    }
-
-    #endregion
-
-    #region Compaction Manager
-
-    /// <summary>
-    /// Compaction manager with auto compactiion system.
-    /// </summary>
-    internal class CompactionManager
-    {
-        private readonly SSTableManager _sstableManager;
-        private readonly VersionManager _versionManager;
-        private readonly MiniDBOptions _options;
-        private readonly Logger _logger;
-        private readonly SemaphoreSlim _compactionLock = new(1, 1);
-        private readonly CompactionStats _stats = new();
-
-        private readonly AdaptiveThrottler _throttler;
-
-        private readonly long[] _levelMaxBytes = new long[7]; // 7 levels
-        private const int MAX_LEVEL = 6;
-
-        public DateTime? LastCompactionTime { get; private set; }
-        public CompactionStats Stats => _stats;
-
-        public CompactionManager(SSTableManager sstableManager, VersionManager versionManager, MiniDBOptions options, Logger logger)
-        {
-            _sstableManager = sstableManager;
-            _versionManager = versionManager;
-            _options = options;
-            _logger = logger;
-            _throttler = new AdaptiveThrottler(options);
-
-            InitializeLevelSizes();
-        }
-
-        private void InitializeLevelSizes()
-        {
-            _levelMaxBytes[0] = 256L * 1024 * 1024;
-
-            for (int i = 1; i <= MAX_LEVEL; i++)
-            {
-                _levelMaxBytes[i] = _levelMaxBytes[i - 1] * 10;
-            }
-        }
-
-        public bool ShouldCompact()
-        {
-            var snapshot = _versionManager.GetCurrentSnapshot();
-
-            for (int level = 0; level <= MAX_LEVEL; level++)
-            {
-                if (ShouldCompactLevel(snapshot, level))
-                    return true;
-            }
-
-            return false;
-        }
-
-        private bool ShouldCompactLevel(DatabaseSnapshot snapshot, int level)
-        {
-            var levelSSTables = snapshot.SSTables.Where(s => s.Level == level).ToList();
-
-            if (level == 0)
-            {
-                return levelSSTables.Count >= _options.Level0CompactionTrigger;
-            }
-            else
-            {
-                long levelSize = levelSSTables.Sum(s => s.FileSizeBytes);
-                return levelSize > _levelMaxBytes[level];
-            }
-        }
-
-        public async Task CompactAsync(CancellationToken cancellationToken)
-        {
-            if (!await _compactionLock.WaitAsync(0, cancellationToken))
-            {
-                _logger.Log("⏭️ Compaction already in progress, skipping.");
+                _currentKey = null;
                 return;
             }
 
-            try
+            if (_currentKey != null && shared > 0)
             {
-                var snapshot = _versionManager.GetCurrentSnapshot();
-                int targetLevel = SelectCompactionLevel(snapshot);
-
-                if (targetLevel == -1)
-                {
-                    _logger.Log("✅ No compaction needed.");
-                    return;
-                }
-
-                _logger.Log($"🗜️ Starting compaction for Level {targetLevel}...");
-                var sw = Stopwatch.StartNew();
-
-                if (targetLevel == 0)
-                {
-                    await CompactLevel0Async(snapshot, cancellationToken);
-                }
-                else
-                {
-                    await CompactLevelNAsync(snapshot, targetLevel, cancellationToken);
-                }
-
-                LastCompactionTime = DateTime.UtcNow;
-                _stats.RecordCompaction(sw.Elapsed);
-
-                _logger.Log($"✅ Compaction completed in {sw.ElapsedMilliseconds}ms");
-            }
-            catch (Exception ex)
-            {
-                _logger.LogError($"❌ Compaction failed: {ex.Message}");
-                _stats.RecordFailure();
-                throw;
-            }
-            finally
-            {
-                _compactionLock.Release();
-            }
-        }
-
-        private int SelectCompactionLevel(DatabaseSnapshot snapshot)
-        {
-            double maxScore = 0;
-            int maxLevel = -1;
-
-            for (int level = 0; level <= MAX_LEVEL; level++)
-            {
-                double score = CalculateCompactionScore(snapshot, level);
-
-                if (score > maxScore)
-                {
-                    maxScore = score;
-                    maxLevel = level;
-                }
-            }
-
-            return maxScore > 1.0 ? maxLevel : -1;
-        }
-
-        private double CalculateCompactionScore(DatabaseSnapshot snapshot, int level)
-        {
-            var levelSSTables = snapshot.SSTables.Where(s => s.Level == level).ToList();
-
-            if (level == 0)
-            {
-                return (double)levelSSTables.Count / _options.Level0CompactionTrigger;
+                var newKey = new char[shared + nonShared];
+                for (int i = 0; i < shared; i++) newKey[i] = _currentKey[i];
+                for (int i = 0; i < nonShared; i++) newKey[i + (int)shared] = (char)_data[keyOffset + i];
+                _currentKey = new string(newKey);
             }
             else
             {
-                long levelSize = levelSSTables.Sum(s => s.FileSizeBytes);
-                return (double)levelSize / _levelMaxBytes[level];
-            }
-        }
-
-        /// <summary>
-        /// Compact Level 0 to Level 1.
-        /// Level 0 files can overlap, so we need to merge all overlapping files.
-        /// </summary>
-        private async Task CompactLevel0Async(DatabaseSnapshot snapshot, CancellationToken cancellationToken)
-        {
-            var level0Files = snapshot.SSTables.Where(s => s.Level == 0).ToList();
-
-            if (level0Files.Count == 0) return;
-
-            var level1Files = await FindOverlappingFiles(snapshot, level0Files, 1, cancellationToken);
-
-            var allFiles = level0Files.Concat(level1Files).ToList();
-            var mergedEntries = await MergeSSTables(allFiles, cancellationToken);
-
-            var newSSTables = await CreateCompactedSSTables(mergedEntries, 1, cancellationToken);
-
-            _versionManager.ReplaceSSTablesAtomic(allFiles, newSSTables);
-
-            _logger.Log($"📊 Compacted {level0Files.Count} L0 files + {level1Files.Count} L1 files → {newSSTables.Count} L1 files");
-        }
-
-        /// <summary>
-        /// Compact Level N to Level N+1.
-        /// Pick one file from Level N and all overlapping files from Level N+1.
-        /// </summary>
-        private async Task CompactLevelNAsync(DatabaseSnapshot snapshot, int level, CancellationToken cancellationToken)
-        {
-            if (level >= MAX_LEVEL) return;
-
-            var levelFiles = snapshot.SSTables.Where(s => s.Level == level).ToList();
-
-            if (levelFiles.Count == 0) return;
-
-            var sourceFile = levelFiles.OrderBy(f => f.CreationTime).First();
-
-            var nextLevelFiles = await FindOverlappingFiles(snapshot, new[] { sourceFile }, level + 1, cancellationToken);
-
-            var allFiles = new[] { sourceFile }.Concat(nextLevelFiles).ToList();
-            var mergedEntries = await MergeSSTables(allFiles, cancellationToken);
-
-            var newSSTables = await CreateCompactedSSTables(mergedEntries, level + 1, cancellationToken);
-
-            _versionManager.ReplaceSSTablesAtomic(allFiles, newSSTables);
-
-            _logger.Log($"📊 Compacted 1 L{level} file + {nextLevelFiles.Count} L{level + 1} files → {newSSTables.Count} L{level + 1} files");
-        }
-
-        /// <summary>
-        /// Find all SSTables in targetLevel that overlap with the key range of sourceFiles.
-        /// </summary>
-        private async Task<List<SSTable>> FindOverlappingFiles(
-            DatabaseSnapshot snapshot,
-            IEnumerable<SSTable> sourceFiles,
-            int targetLevel,
-            CancellationToken cancellationToken)
-        {
-            var (minKey, maxKey) = await GetKeyRange(sourceFiles, cancellationToken);
-
-            if (minKey == null || maxKey == null)
-                return new List<SSTable>();
-
-            var targetFiles = snapshot.SSTables.Where(s => s.Level == targetLevel).ToList();
-            var overlapping = new List<SSTable>();
-
-            foreach (var file in targetFiles)
-            {
-                var (fileMin, fileMax) = await GetKeyRange(new[] { file }, cancellationToken);
-
-                if (fileMin == null || fileMax == null) continue;
-
-                if (string.Compare(fileMin, maxKey, StringComparison.Ordinal) <= 0 &&
-                    string.Compare(fileMax, minKey, StringComparison.Ordinal) >= 0)
-                {
-                    overlapping.Add(file);
-                }
+                _currentKey = Encoding.UTF8.GetString(_data, keyOffset, (int)nonShared);
             }
 
-            return overlapping;
-        }
-
-        private async Task<(string? minKey, string? maxKey)> GetKeyRange(
-            IEnumerable<SSTable> sstables,
-            CancellationToken cancellationToken)
-        {
-            string? minKey = null;
-            string? maxKey = null;
-
-            foreach (var sstable in sstables)
+            _currentValue = valLen > 0 ? new byte[valLen] : null;
+            if (valLen > 0)
             {
-                await foreach (var entry in sstable.ScanAsync(cancellationToken))
-                {
-                    if (minKey == null || string.Compare(entry.Key, minKey, StringComparison.Ordinal) < 0)
-                        minKey = entry.Key;
-
-                    if (maxKey == null || string.Compare(entry.Key, maxKey, StringComparison.Ordinal) > 0)
-                        maxKey = entry.Key;
-                }
-            }
-
-            return (minKey, maxKey);
-        }
-
-        /// <summary>
-        /// Merge multiple SSTables with incremental processing and throttling.
-        /// </summary>
-        private async Task<List<DataEntry>> MergeSSTables(List<SSTable> sstables, CancellationToken cancellationToken)
-        {
-            var merged = new SortedDictionary<string, DataEntry>(StringComparer.Ordinal);
-            int processedEntries = 0;
-
-            foreach (var sstable in sstables.OrderByDescending(s => s.CreationTime))
-            {
-                await foreach (var entry in sstable.ScanAsync(cancellationToken))
-                {
-                    if (!merged.TryGetValue(entry.Key, out var existing) ||
-                        entry.SequenceNumber > existing.SequenceNumber)
-                    {
-                        merged[entry.Key] = entry;
-                    }
-
-                    processedEntries++;
-
-                    if (processedEntries % 1000 == 0)
-                    {
-                        await _throttler.ThrottleIfNeededAsync(cancellationToken);
-                    }
-                }
-            }
-
-            var cutoffTime = DateTime.UtcNow.AddDays(-_options.TombstoneRetentionDays);
-
-            var result = merged.Values
-                .Where(e => !e.IsDeleted || e.Timestamp > cutoffTime)
-                .Where(e => !e.IsDeleted)
-                .ToList();
-
-            _stats.RecordEntriesCompacted(processedEntries);
-            _stats.RecordEntriesDeleted(merged.Count - result.Count);
-
-            return result;
-        }
-
-        /// <summary>
-        /// Create multiple SSTables from merged entries, splitting if needed.
-        /// </summary>
-        private async Task<List<SSTable>> CreateCompactedSSTables(
-            List<DataEntry> entries,
-            int level,
-            CancellationToken cancellationToken)
-        {
-            var newSSTables = new List<SSTable>();
-            const long MAX_FILE_SIZE = 64 * 1024 * 1024;
-
-            var currentBatch = new List<DataEntry>();
-            long currentSize = 0;
-
-            foreach (var entry in entries)
-            {
-                var entrySize = EstimateEntrySize(entry);
-
-                if (currentSize + entrySize > MAX_FILE_SIZE && currentBatch.Count > 0)
-                {
-                    var sstable = await _sstableManager.CreateSSTableAsync(currentBatch, level, cancellationToken);
-                    newSSTables.Add(sstable);
-
-                    currentBatch.Clear();
-                    currentSize = 0;
-                }
-
-                currentBatch.Add(entry);
-                currentSize += entrySize;
-            }
-
-            if (currentBatch.Count > 0)
-            {
-                var sstable = await _sstableManager.CreateSSTableAsync(currentBatch, level, cancellationToken);
-                newSSTables.Add(sstable);
-            }
-
-            return newSSTables;
-        }
-
-        private long EstimateEntrySize(DataEntry entry)
-        {
-            long size = 0;
-            size += entry.Key.Length * 2;
-            size += entry.Value?.Length ?? 0;
-            size += entry.TypeName?.Length * 2 ?? 0;
-            size += 64;
-            return size;
-        }
-    }
-
-    #endregion
-
-    #region Bloom Filter
-
-    /// <summary>
-    /// Space-efficient probabilistic data structure for set membership testing.
-    /// Used to quickly determine if a key might exist in an SSTable.
-    /// </summary>
-    internal class BloomFilter
-    {
-        private readonly BitArray _bits;
-        private readonly int _hashCount;
-        private readonly int _bitCount;
-
-        public BloomFilter(int expectedElements, double falsePositiveRate)
-        {
-            _bitCount = (int)Math.Ceiling(-expectedElements * Math.Log(falsePositiveRate) / (Math.Log(2) * Math.Log(2)));
-            _hashCount = (int)Math.Ceiling(_bitCount / (double)expectedElements * Math.Log(2));
-
-            _bits = new BitArray(_bitCount);
-        }
-
-        private BloomFilter(int bitCount, int hashCount, BitArray bits)
-        {
-            _bitCount = bitCount;
-            _hashCount = hashCount;
-            _bits = bits;
-        }
-
-        public void Add(string key)
-        {
-            foreach (var hash in GetHashes(key))
-            {
-                _bits[hash] = true;
-            }
-        }
-
-        public bool MightContain(string key)
-        {
-            foreach (var hash in GetHashes(key))
-            {
-                if (!_bits[hash])
-                    return false;
-            }
-            return true;
-        }
-
-        private IEnumerable<int> GetHashes(string key)
-        {
-            var hash1 = GetHash1(key);
-            var hash2 = GetHash2(key);
-
-            for (int i = 0; i < _hashCount; i++)
-            {
-                var hash = (hash1 + i * hash2) % _bitCount;
-                if (hash < 0) hash += _bitCount;
-                yield return hash;
-            }
-        }
-
-        private int GetHash1(string key)
-        {
-            return Math.Abs(key.GetHashCode()) % _bitCount;
-        }
-
-        private int GetHash2(string key)
-        {
-            unchecked
-            {
-                const int fnvPrime = 16777619;
-                int hash = (int)2166136261;
-
-                foreach (char c in key)
-                {
-                    hash ^= c;
-                    hash *= fnvPrime;
-                }
-
-                return Math.Abs(hash) % _bitCount;
-            }
-        }
-
-        public async Task WriteToStreamAsync(Stream stream, CancellationToken cancellationToken)
-        {
-            await WriteInt32Async(stream, _bitCount, cancellationToken);
-            await WriteInt32Async(stream, _hashCount, cancellationToken);
-
-            byte[] bytes = new byte[(_bitCount + 7) / 8];
-            _bits.CopyTo(bytes, 0);
-            await stream.WriteAsync(bytes, 0, bytes.Length, cancellationToken);
-        }
-
-        public async Task ReadFromStreamAsync(Stream stream, CancellationToken cancellationToken)
-        {
-            var bitCount = await ReadInt32Async(stream, cancellationToken);
-            var hashCount = await ReadInt32Async(stream, cancellationToken);
-
-            byte[] bytes = new byte[(bitCount + 7) / 8];
-            await stream.ReadAsync(bytes, 0, bytes.Length, cancellationToken);
-
-            var bits = new BitArray(bytes);
-            for (int i = 0; i < Math.Min(bitCount, _bitCount); i++)
-            {
-                _bits[i] = bits[i];
-            }
-        }
-
-        private static async Task WriteInt32Async(Stream stream, int value, CancellationToken cancellationToken)
-        {
-            var bytes = BitConverter.GetBytes(value);
-            await stream.WriteAsync(bytes, 0, bytes.Length, cancellationToken);
-        }
-
-        private static async Task<int> ReadInt32Async(Stream stream, CancellationToken cancellationToken)
-        {
-            var bytes = new byte[4];
-            await stream.ReadAsync(bytes, 0, 4, cancellationToken);
-            return BitConverter.ToInt32(bytes, 0);
-        }
-    }
-
-    #endregion
-
-    #region Data Models
-
-    internal class DataEntry
-    {
-        public string Key { get; set; } = string.Empty;
-        public byte[]? Value { get; set; }
-        public string? TypeName { get; set; }
-        public long SequenceNumber { get; set; }
-        public bool IsDeleted { get; set; }
-        public DateTime Timestamp { get; set; }
-    }
-
-    internal class WALEntry
-    {
-        public long SequenceNumber { get; set; }
-        public string Key { get; set; } = string.Empty;
-        public byte[]? Value { get; set; }
-        public string? TypeName { get; set; }
-        public bool IsDeleted { get; set; }
-        public DateTime Timestamp { get; set; }
-    }
-
-    internal enum WriteType
-    {
-        Insert,
-        Upsert,
-        Delete
-    }
-
-    #endregion
-
-    #region Metrics Collector
-
-    internal class MetricsCollector
-    {
-        private long _totalOps = 0;
-        private long _readOps = 0;
-        private long _writeOps = 0;
-        private long _cacheHits = 0;
-        private long _cacheMisses = 0;
-
-        private readonly ConcurrentQueue<TimeSpan> _readLatencies = new();
-        private readonly ConcurrentQueue<TimeSpan> _writeLatencies = new();
-
-        private const int MAX_LATENCY_SAMPLES = 1000;
-
-        public long TotalOperations => Interlocked.Read(ref _totalOps);
-        public long ReadOperations => Interlocked.Read(ref _readOps);
-        public long WriteOperations => Interlocked.Read(ref _writeOps);
-
-        public double CacheHitRate
-        {
-            get
-            {
-                var hits = Interlocked.Read(ref _cacheHits);
-                var misses = Interlocked.Read(ref _cacheMisses);
-                var total = hits + misses;
-                return total == 0 ? 0 : (double)hits / total;
-            }
-        }
-
-        public TimeSpan AverageReadLatency
-        {
-            get
-            {
-                var latencies = _readLatencies.ToArray();
-                return latencies.Length == 0 ? TimeSpan.Zero : TimeSpan.FromTicks((long)latencies.Average(l => l.Ticks));
-            }
-        }
-
-        public TimeSpan AverageWriteLatency
-        {
-            get
-            {
-                var latencies = _writeLatencies.ToArray();
-                return latencies.Length == 0 ? TimeSpan.Zero : TimeSpan.FromTicks((long)latencies.Average(l => l.Ticks));
-            }
-        }
-
-        public void RecordRead(TimeSpan latency, bool cacheHit)
-        {
-            Interlocked.Increment(ref _totalOps);
-            Interlocked.Increment(ref _readOps);
-
-            if (cacheHit)
-                Interlocked.Increment(ref _cacheHits);
-            else
-                Interlocked.Increment(ref _cacheMisses);
-
-            _readLatencies.Enqueue(latency);
-            TrimQueue(_readLatencies);
-        }
-
-        public void RecordWrite(TimeSpan latency)
-        {
-            Interlocked.Increment(ref _totalOps);
-            Interlocked.Increment(ref _writeOps);
-
-            _writeLatencies.Enqueue(latency);
-            TrimQueue(_writeLatencies);
-        }
-
-        public void RecordBatchWrite(int count, TimeSpan latency)
-        {
-            Interlocked.Add(ref _totalOps, count);
-            Interlocked.Add(ref _writeOps, count);
-
-            _writeLatencies.Enqueue(latency);
-            TrimQueue(_writeLatencies);
-        }
-
-        private void TrimQueue(ConcurrentQueue<TimeSpan> queue)
-        {
-            while (queue.Count > MAX_LATENCY_SAMPLES)
-            {
-                queue.TryDequeue(out _);
+                Buffer.BlockCopy(_data, valOffset, _currentValue, 0, (int)valLen);
             }
         }
     }
 
-    #endregion
-
-    #region Public API Models
-
-    public class BatchOperation
+    internal class FilterBlock
     {
-        public string Key { get; set; } = string.Empty;
-        public object? Data { get; set; }
-        public BatchOperationType Type { get; set; }
-        public bool ContinueOnError { get; set; } = false;
-    }
+        private const int FILTER_BASE_LG = 11;
+        private List<ulong> _filter;
+        private List<uint> _offsets;
+        private string _lastKey;
 
-    public enum BatchOperationType
-    {
-        Insert,
-        Upsert,
-        Delete
-    }
-
-    public class DatabaseStats
-    {
-        public int TotalEntries { get; set; }
-        public int MemTableEntries { get; set; }
-        public long MemTableSizeBytes { get; set; }
-        public int SSTableCount { get; set; }
-        public long TotalSizeBytes { get; set; }
-        public long TotalOperations { get; set; }
-        public long ReadOperations { get; set; }
-        public long WriteOperations { get; set; }
-        public TimeSpan AverageReadLatency { get; set; }
-        public TimeSpan AverageWriteLatency { get; set; }
-        public double CacheHitRate { get; set; }
-        public DateTime? LastCompactionTime { get; set; }
-        public long WALSizeBytes { get; set; }
-    }
-
-    #endregion
-
-    #region Exceptions
-
-    public class MiniDBException : Exception
-    {
-        public MiniDBException(string message) : base(message) { }
-        public MiniDBException(string message, Exception innerException) : base(message, innerException) { }
-    }
-
-    public class MiniDBKeyNotFoundException : MiniDBException
-    {
-        public MiniDBKeyNotFoundException(string key) : base($"Key '{key}' not found.") { }
-    }
-
-    public class MiniDBTypeMismatchException : MiniDBException
-    {
-        public MiniDBTypeMismatchException(string key, Type expectedType, Type actualType)
-            : base($"Type mismatch for key '{key}'. Expected: {expectedType.Name}, Actual: {actualType.Name}") { }
-    }
-
-    #endregion
-
-    #region BitArray Helper
-
-    internal class BitArray
-    {
-        private readonly int[] _array;
-        private readonly int _length;
-
-        public BitArray(int length)
+        public FilterBlock()
         {
-            _length = length;
-            _array = new int[(length + 31) / 32];
+            _filter = new List<ulong>();
+            _offsets = new List<uint>();
         }
 
-        public BitArray(byte[] bytes)
+        public FilterBlock(byte[] data)
         {
-            _length = bytes.Length * 8;
-            _array = new int[(bytes.Length + 3) / 4];
-            Buffer.BlockCopy(bytes, 0, _array, 0, bytes.Length);
-        }
-
-        public bool this[int index]
-        {
-            get
+            var n = BitConverter.ToInt32(data, 0);
+            var baseLg = data[4];
+            _offsets = new List<uint>(n);
+            int pos = 5;
+            for (int i = 0; i <= n; i++)
             {
-                if (index < 0 || index >= _length)
-                    throw new ArgumentOutOfRangeException(nameof(index));
-
-                int arrayIndex = index / 32;
-                int bitIndex = index % 32;
-                return (_array[arrayIndex] & (1 << bitIndex)) != 0;
+                _offsets.Add(BitConverter.ToUInt32(data, pos));
+                pos += 4;
             }
-            set
+            var filterData = new byte[data.Length - pos];
+            Buffer.BlockCopy(data, pos, filterData, 0, filterData.Length);
+
+            _filter = new List<ulong>(filterData.Length / 8);
+            for (int i = 0; i < filterData.Length; i += 8)
             {
-                if (index < 0 || index >= _length)
-                    throw new ArgumentOutOfRangeException(nameof(index));
-
-                int arrayIndex = index / 32;
-                int bitIndex = index % 32;
-
-                if (value)
-                    _array[arrayIndex] |= (1 << bitIndex);
-                else
-                    _array[arrayIndex] &= ~(1 << bitIndex);
+                _filter.Add(BitConverter.ToUInt64(filterData, i));
             }
         }
 
-        public void CopyTo(byte[] array, int arrayIndex)
+        public void AddKey(string key)
         {
-            Buffer.BlockCopy(_array, 0, array, arrayIndex, Math.Min(_array.Length * 4, array.Length - arrayIndex));
+            var hash = Hash(key);
+            var idx = hash & 0x7fffffff;
+
+            var delta = idx >> 17 | idx << 15;
+
+            if (_filter.Count == 0) _filter.Capacity = 1000;
+
+            while (_filter.Count <= (int)(idx % (uint)_filter.Capacity))
+            {
+                _filter.Add(0);
+            }
+
+            var arrayIdx = (int)(idx % (uint)_filter.Count);
+            _filter[arrayIdx] |= delta | (1UL << (int)(idx % 64));
+            _lastKey = key;
+        }
+
+        public bool KeyMayMatch(string key)
+        {
+            if (_filter.Count == 0) return true;
+            var h = Hash(key);
+            var i = (int)(h >> 17);
+            if (i < 0 || i >= _filter.Count) return true;
+            return (_filter[i] & (1UL << (int)(h & 63))) != 0;
+        }
+
+        public byte[] Generate()
+        {
+            using var ms = new MemoryStream();
+            var bw = new BinaryWriter(ms);
+            bw.Write(_offsets.Count - 1);
+            bw.Write((byte)FILTER_BASE_LG);
+            foreach (var o in _offsets) bw.Write(o);
+
+            var filterBytes = new byte[_filter.Count * 8];
+            Buffer.BlockCopy(_filter.ToArray(), 0, filterBytes, 0, filterBytes.Length);
+            bw.Write(filterBytes);
+
+            return ms.ToArray();
+        }
+
+        private uint Hash(string key)
+        {
+            var bytes = Encoding.UTF8.GetBytes(key);
+            uint h = 0xDEADBEEF;
+            foreach (var b in bytes)
+            {
+                h += b;
+                h += h << 10;
+                h ^= h >> 6;
+            }
+            h += h << 3;
+            h ^= h >> 11;
+            h += h << 15;
+            return h;
         }
     }
 
-    #region Adaptive Throttler
-
-    /// <summary>
-    /// Adaptive throttler that slows down compaction when system is under load.
-    /// Monitors write rate and adjusts compaction speed accordingly.
-    /// </summary>
-    internal class AdaptiveThrottler
+    internal struct BlockHandle
     {
+        public long Offset;
+        public int Size;
+
+        public byte[] Encode()
+        {
+            var bytes = new byte[12];
+            Buffer.BlockCopy(BitConverter.GetBytes(Offset), 0, bytes, 0, 8);
+            Buffer.BlockCopy(BitConverter.GetBytes(Size), 0, bytes, 8, 4);
+            return bytes;
+        }
+
+        public static BlockHandle Decode(byte[] data)
+        {
+            return new BlockHandle
+            {
+                Offset = BitConverter.ToInt64(data, 0),
+                Size = BitConverter.ToInt32(data, 8)
+            };
+        }
+    }
+
+    internal struct Footer
+    {
+        public const int Length = 48;
+        public long IndexOffset;
+        public int IndexSize;
+        public long FilterOffset;
+        public int FilterSize;
+
+        public byte[] Encode()
+        {
+            var bytes = new byte[Length];
+            var i = 0;
+            Buffer.BlockCopy(BitConverter.GetBytes(IndexOffset), 0, bytes, i, 8); i += 8;
+            Buffer.BlockCopy(BitConverter.GetBytes(IndexSize), 0, bytes, i, 4); i += 4;
+            Buffer.BlockCopy(BitConverter.GetBytes(FilterOffset), 0, bytes, i, 8); i += 8;
+            Buffer.BlockCopy(BitConverter.GetBytes(FilterSize), 0, bytes, i, 4); i += 4;
+            var meta = Encoding.UTF8.GetBytes("minidb.footer");
+            Buffer.BlockCopy(meta, 0, bytes, i, meta.Length);
+            return bytes;
+        }
+
+        public static Footer Decode(byte[] data)
+        {
+            return new Footer
+            {
+                IndexOffset = BitConverter.ToInt64(data, 0),
+                IndexSize = BitConverter.ToInt32(data, 8),
+                FilterOffset = BitConverter.ToInt64(data, 12),
+                FilterSize = BitConverter.ToInt32(data, 20)
+            };
+        }
+    }
+
+    internal class VersionSet
+    {
+        private readonly string _directory;
         private readonly MiniDBOptions _options;
-        private readonly RateLimiter _rateLimiter;
-        private long _lastWriteCount = 0;
-        private DateTime _lastCheckTime = DateTime.UtcNow;
+        private readonly TableCache _cache;
+        private readonly Logger _logger;
+        private Version _current;
+        private long _nextFileNumber;
+        private ConcurrentDictionary<string, MemEntry> _immutable;
 
-        public AdaptiveThrottler(MiniDBOptions options)
+        public VersionSet(string directory, MiniDBOptions options, TableCache cache, Logger logger)
         {
+            _directory = directory;
             _options = options;
-            _rateLimiter = new RateLimiter(options.CompactionMaxBytesPerSecond);
+            _cache = cache;
+            _logger = logger;
+            _current = new Version();
+            _immutable = new ConcurrentDictionary<string, MemEntry>();
         }
 
-        public async Task ThrottleIfNeededAsync(CancellationToken cancellationToken)
+        public void Load()
         {
-            var now = DateTime.UtcNow;
-            var elapsed = (now - _lastCheckTime).TotalSeconds;
-
-            if (elapsed > 1.0)
+            var files = Directory.GetFiles(Path.Combine(_directory, "sst"), "*.sst");
+            foreach (var f in files)
             {
-                _lastCheckTime = now;
-            }
-
-            await _rateLimiter.WaitAsync(4096, cancellationToken);
-        }
-    }
-
-    #endregion
-
-    #region Rate Limiter
-
-    /// <summary>
-    /// Token bucket rate limiter for controlling compaction I/O.
-    /// </summary>
-    internal class RateLimiter
-    {
-        private readonly long _bytesPerSecond;
-        private long _availableBytes;
-        private DateTime _lastRefill;
-        private readonly object _lock = new();
-
-        public RateLimiter(long bytesPerSecond)
-        {
-            _bytesPerSecond = bytesPerSecond;
-            _availableBytes = bytesPerSecond;
-            _lastRefill = DateTime.UtcNow;
-        }
-
-        public async Task WaitAsync(long bytes, CancellationToken cancellationToken)
-        {
-            while (true)
-            {
-                lock (_lock)
+                if (long.TryParse(Path.GetFileNameWithoutExtension(f), out long num))
                 {
-                    Refill();
-
-                    if (_availableBytes >= bytes)
-                    {
-                        _availableBytes -= bytes;
-                        return;
-                    }
+                    if (num > _nextFileNumber) _nextFileNumber = num + 1;
+                    var meta = new FileMetaData { Number = num, AllowedSeeks = 1 << 30, Smallest = new InternalKey(""), Largest = new InternalKey("") };
+                    _current.Files[0].Add(meta);
                 }
-
-                await Task.Delay(10, cancellationToken);
             }
         }
 
-        private void Refill()
+        public void LogAndApply(int level, FileMetaData f)
         {
-            var now = DateTime.UtcNow;
-            var elapsed = (now - _lastRefill).TotalSeconds;
+            var v = new Version();
+            for (int i = 0; i < 7; i++) v.Files[i] = new List<FileMetaData>(_current.Files[i]);
+            v.Files[level].Add(f);
+            _current = v;
+        }
 
-            if (elapsed > 0)
+        public Version Current() => _current;
+
+        public long NewFileNumber() => Interlocked.Increment(ref _nextFileNumber);
+
+        public MemEntry GetImmutable(string key)
+        {
+            return _immutable.TryGetValue(key, out var e) ? e : null;
+        }
+
+        public void SetImmutable(ConcurrentDictionary<string, MemEntry> imm) => _immutable = imm;
+
+        public bool NeedsCompaction() => _current.Files[0].Count >= _options.Level0CompactionTrigger;
+
+        public async Task DoCompaction()
+        {
+            var files = _current.Files[0].OrderBy(f => f.Number).ToList();
+            if (files.Count < _options.Level0CompactionTrigger) return;
+
+            _logger.Log($"Compacting {files.Count} files from L0 to L1");
+
+            var meta = new FileMetaData
             {
-                var refillAmount = (long)(elapsed * _bytesPerSecond);
-                _availableBytes = Math.Min(_availableBytes + refillAmount, _bytesPerSecond);
-                _lastRefill = now;
-            }
-        }
-    }
+                Number = NewFileNumber(),
+                Size = 0
+            };
 
-    #endregion
+            var path = Path.Combine(_directory, "sst", $"{meta.Number}.sst");
+            var writer = new SSTableWriter(path, _options);
 
-    #region Compaction Stats
-
-    internal class CompactionStats
-    {
-        private long _totalCompactions = 0;
-        private long _totalEntriesCompacted = 0;
-        private long _totalEntriesDeleted = 0;
-        private long _totalBytesCompacted = 0;
-        private long _failedCompactions = 0;
-        private readonly ConcurrentQueue<TimeSpan> _compactionTimes = new();
-
-        public long TotalCompactions => Interlocked.Read(ref _totalCompactions);
-        public long TotalEntriesCompacted => Interlocked.Read(ref _totalEntriesCompacted);
-        public long TotalEntriesDeleted => Interlocked.Read(ref _totalEntriesDeleted);
-        public long FailedCompactions => Interlocked.Read(ref _failedCompactions);
-
-        public TimeSpan AverageCompactionTime
-        {
-            get
+            bool first = true;
+            foreach (var entry in _immutable.Values.OrderBy(x => x.Key))
             {
-                var times = _compactionTimes.ToArray();
-                return times.Length == 0 ? TimeSpan.Zero :
-                    TimeSpan.FromTicks((long)times.Average(t => t.Ticks));
+                if (first)
+                {
+                    meta.Smallest = new InternalKey(entry.Key);
+                    meta.Largest = new InternalKey(entry.Key);
+                    first = false;
+                }
+                else
+                {
+                    if (string.Compare(entry.Key, meta.Smallest.UserKey) < 0) meta.Smallest = new InternalKey(entry.Key);
+                    if (string.Compare(entry.Key, meta.Largest.UserKey) > 0) meta.Largest = new InternalKey(entry.Key);
+                }
+                meta.Size += writer.Add(entry.Key, entry.Type, entry.Value);
             }
+            writer.Finish();
+
+            var v = new Version();
+            v.Files[0] = new List<FileMetaData>();
+            for (int i = 1; i < 7; i++) v.Files[i] = new List<FileMetaData>(_current.Files[i]);
+
+            v.Files[1].Add(meta);
+            _current = v;
+
+            foreach (var f in files)
+            {
+                try
+                {
+                    _cache.GetTable(f.Number).Dispose();
+                    _cache.EvictFile(f.Number);
+                    File.Delete(Path.Combine(_directory, "sst", $"{f.Number}.sst"));
+                }
+                catch { }
+            }
+            _immutable.Clear();
         }
 
-        public void RecordCompaction(TimeSpan duration)
+        public async Task<byte[]> GetAsync(string key)
         {
-            Interlocked.Increment(ref _totalCompactions);
-            _compactionTimes.Enqueue(duration);
+            foreach (var f in _current.Files[0])
+            {
+                var val = await _cache.GetAsync(f.Number, key);
+                if (val != null) return val;
+            }
 
-            while (_compactionTimes.Count > 100)
-                _compactionTimes.TryDequeue(out _);
-        }
-
-        public void RecordEntriesCompacted(int count)
-        {
-            Interlocked.Add(ref _totalEntriesCompacted, count);
-        }
-
-        public void RecordEntriesDeleted(int count)
-        {
-            Interlocked.Add(ref _totalEntriesDeleted, count);
-        }
-
-        public void RecordFailure()
-        {
-            Interlocked.Increment(ref _failedCompactions);
+            for (int l = 1; l < 7; l++)
+            {
+                var file = _current.Files[l].FirstOrDefault(f => string.Compare(f.Smallest.UserKey, key) <= 0 && string.Compare(f.Largest.UserKey, key) >= 0);
+                if (file != null)
+                {
+                    var val = await _cache.GetAsync(file.Number, key);
+                    if (val != null) return val;
+                }
+            }
+            return null;
         }
     }
 
-    #endregion
-
-    #region Enhanced Options
-
-    public class MiniDBOptions
+    internal class Version
     {
-        public string DataDirectory { get; set; } = "minidb_data";
-        public long MemTableSizeBytes { get; set; } = 64 * 1024 * 1024;
-        public int Level0CompactionTrigger { get; set; } = 4;
-        public int MaxConcurrentWrites { get; set; } = 100;
-        public TimeSpan FlushCheckInterval { get; set; } = TimeSpan.FromSeconds(10);
-        public TimeSpan CompactionCheckInterval { get; set; } = TimeSpan.FromSeconds(30);
-
-        /// <summary>
-        /// Maximum bytes per second for compaction I/O (default: 50MB/s).
-        /// Prevents compaction from overwhelming the system.
-        /// </summary>
-        public long CompactionMaxBytesPerSecond { get; set; } = 50 * 1024 * 1024;
-
-        /// <summary>
-        /// How long to keep tombstones before garbage collecting (default: 7 days).
-        /// </summary>
-        public int TombstoneRetentionDays { get; set; } = 7;
-
-        /// <summary>
-        /// Enable parallel compaction for independent key ranges (default: true).
-        /// </summary>
-        public bool EnableParallelCompaction { get; set; } = true;
+        public List<List<FileMetaData>> Files { get; set; } = new List<List<FileMetaData>>
+        {
+            new(), new(), new(), new(), new(), new(), new()
+        };
     }
 
-    #endregion
+    internal class FileMetaData
+    {
+        public long Number;
+        public long Size;
+        public InternalKey Smallest;
+        public InternalKey Largest;
+        public long AllowedSeeks;
+    }
 
-    #endregion
+    internal struct InternalKey
+    {
+        public string UserKey;
+        public InternalKey(string key) { UserKey = key; }
+    }
 }

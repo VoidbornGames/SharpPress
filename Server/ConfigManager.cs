@@ -44,12 +44,12 @@ namespace SharpPress.Services
             }
         }
 
-        public void SaveConfig()
+        public async Task SaveConfig()
         {
             try
             {
                 string json = JsonConvert.SerializeObject(Config, Formatting.Indented);
-                File.WriteAllText(_configFile, json);
+                await File.WriteAllTextAsync(_configFile, json);
                 _logger.Log("✅ Config saved.");
             }
             catch (Exception ex)

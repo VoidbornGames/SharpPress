@@ -4,6 +4,38 @@ using SharpPress.Services;
 
 namespace SharpPress.Models
 {
+
+    public class SiteSettings
+    {
+        public GeneralSettings General { get; set; }
+        public SecuritySettings Security { get; set; }
+        public AdvancedSettings Advanced { get; set; }
+    }
+
+    public class GeneralSettings
+    {
+        public string SiteName { get; set; }
+        public string SiteDescription { get; set; }
+        public string AdminEmail { get; set; }
+        public string Timezone { get; set; }
+        public string FooterText { get; set; }
+    }
+
+    public class SecuritySettings
+    {
+        public bool ForceHttps { get; set; }
+        public bool AllowRegistration { get; set; }
+        public bool Require2FA { get; set; }
+        public int SessionTimeout { get; set; }
+    }
+
+    public class AdvancedSettings
+    {
+        public bool EnableCache { get; set; }
+        public bool MaintenanceMode { get; set; }
+        public string CustomCss { get; set; }
+    }
+
     public class PluginSecurityOptions
     {
         public string DefaultMode { get; set; } = "Deny";
@@ -63,6 +95,7 @@ namespace SharpPress.Models
     {
         public bool DebugMode { get; set; } = false;
         public string JwtSecret { get; set; } = "your-super-secret-jwt-key-change-this-in-production-32-chars-min";
+        public SiteSettings SiteSettings { get; set; }
         public string PanelDomain { get; set; } = "example.com";
         public int MaxFailedLoginAttempts { get; set; } = 5;
         public int LockoutDurationMinutes { get; set; } = 3;

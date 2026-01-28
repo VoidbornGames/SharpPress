@@ -1,0 +1,37 @@
+﻿@page "/admin/users"
+@inject SharpPress.Services.FeatherDatabase database
+
+@{
+    Layout = "_AdminLayout";
+    ViewData["Title"] = "Users";
+}
+
+<div class="card">
+    <div class="card-header">
+        <div class="card-title">Plugin Management</div>
+    </div>
+    <div class="alert alert-info">
+        Manage, upload, and configure your extensions here.
+    </div>
+    <div class="table-container">
+        <table>
+            <thead>
+                <tr>
+                    <th>Username</th>
+                    <th>Role</th>
+                    <th>GUID</th>
+                </tr>
+            </thead>
+            <tbody>
+                @foreach (var p in database.GetAll<SharpPress.Models.User>())
+                {
+                    <tr>
+                        <td>@p.Username</td>
+                        <td>@p.Role</td>
+                        <td>@p.uuid</td>
+                    </tr>
+                }
+            </tbody>
+        </table>
+    </div>
+</div>

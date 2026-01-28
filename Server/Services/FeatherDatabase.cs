@@ -5,7 +5,7 @@ using System.Reflection;
 using System.Security;
 using SharpPress.Services;
 
-namespace Server.Services
+namespace SharpPress.Services
 {
     /// <summary>
     /// A lightweight, high-performance SQLite wrapper with Auto-Migration.

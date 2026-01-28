@@ -4,6 +4,7 @@ using Microsoft.AspNetCore.StaticFiles;
 using Newtonsoft.Json;
 using SharpPress.Helpers;
 using SharpPress.Models;
+using SharpPress.Pages;
 using SharpPress.Services;
 using System.Collections.Concurrent;
 using System.Diagnostics;
@@ -402,6 +403,75 @@ namespace SharpPress
                 context.Response.ContentType = "text/html";
                 await context.Response.WriteAsync("<div style='text-align: center; color: #ccc; font-family: sans-serif; padding-top: 50px;'><h1>404</h1><h3>File Not Found</h3><p>SharpPress</p></div>");
             });
+
+
+            app.MapGet("/api/settings", async (
+                HttpRequest request,
+                [FromServices] AuthenticationService authService,
+                [FromServices] ConfigManager configManager) =>
+            {
+                if (!ValidateAdmin(request, authService)) return Results.Unauthorized();
+
+                var defaultSettings = new SiteSettings
+                {
+                    General = new GeneralSettings
+                    {
+                        SiteName = "SharpPress Site",
+                        SiteDescription = "Welcome to my site",
+                        AdminEmail = "admin@example.com",
+                        Timezone = "UTC",
+                        FooterText = "2023 © My Company"
+                    },
+                    Security = new SecuritySettings
+                    {
+                        ForceHttps = false,
+                        AllowRegistration = true,
+                        Require2FA = false,
+                        SessionTimeout = 60
+                    },
+                    Advanced = new AdvancedSettings
+                    {
+                        EnableCache = true,
+                        MaintenanceMode = false,
+                        CustomCss = ""
+                    }
+                };
+
+                if(configManager.Config.SiteSettings != null)
+                    defaultSettings = configManager.Config.SiteSettings;
+
+                return Results.Ok(defaultSettings);
+            });
+
+
+            app.MapPost("/api/settings", async (
+                HttpRequest request,
+                [FromBody] SiteSettings settings,
+                [FromServices] AuthenticationService authService,
+                [FromServices] ConfigManager configManager,
+                Logger logger) =>
+            {
+                if (!ValidateAdmin(request, authService)) return Results.Unauthorized();
+
+                if (settings == null) return Results.BadRequest(new { success = false, message = "Invalid settings data" });
+
+                try
+                {
+                    configManager.Config.SiteSettings = settings;
+                    if (configManager.Config.SiteSettings.Advanced != null)
+                        cacheStaticFiles = configManager.Config.SiteSettings.Advanced.EnableCache;
+
+                    await configManager.SaveConfig();
+
+                    logger.Log($"⚙️ Settings updated by admin.");
+                    return Results.Ok(new { success = true, message = "Settings saved successfully." });
+                }
+                catch (Exception ex)
+                {
+                    logger.LogError($"Error saving settings: {ex.Message}");
+                    return Results.Problem($"Error saving settings: {ex.Message}");
+                }
+            });
         }
 
         private static async Task<bool> ServeFile(HttpContext context, string filePath, string relativePath)
@@ -467,7 +537,7 @@ namespace SharpPress
             }
             catch
             {
-                return false; // Safe fallback if file is locked or unreadable
+                return false;
             }
         }
     }

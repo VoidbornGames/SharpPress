@@ -1,11 +1,10 @@
-﻿using Microsoft.AspNetCore.Server.Kestrel.Core;
-using Microsoft.Extensions.DependencyInjection;
-using Server.Services;
+﻿using Newtonsoft.Json;
 using SharpPress.Events;
 using SharpPress.Helpers;
 using SharpPress.Models;
 using SharpPress.Servers;
 using SharpPress.Services;
+using System.Text;
 
 namespace SharpPress
 {
@@ -28,14 +27,6 @@ namespace SharpPress
             });
             builder.Services.AddRazorPages();
 
-            var options = new MiniDBOptions
-            {
-                DataDirectory = "database",
-                MemTableSizeBytes = 256 * 1024 * 1024,
-                Level0CompactionTrigger = 4,
-                MaxConcurrentWrites = 100
-            };
-
             // Singletons 
             builder.Services.AddSingleton<Logger>();
             builder.Services.AddSingleton(provider => new ConfigManager(logger: provider.GetRequiredService<Logger>()));
@@ -43,7 +34,7 @@ namespace SharpPress
             builder.Services.AddSingleton(provider => provider.GetRequiredService<ConfigManager>().Config);
             builder.Services.AddSingleton<FilePaths>();
             builder.Services.AddSingleton(provider => new ServerSettings { httpPort = httpPort, sftpPort = sftpPort });
-            builder.Services.AddSingleton(provider => new MiniDB(options, provider.GetRequiredService<Logger>()));
+            builder.Services.AddSingleton(provider => new MiniDB(new MiniDBOptions(), provider.GetRequiredService<Logger>()));
             builder.Services.AddSingleton<FeatherDatabase>();
             builder.Services.AddSingleton<CacheService>();
             builder.Services.AddSingleton<IEventBus, InMemoryEventBus>();
@@ -111,6 +102,7 @@ namespace SharpPress
                 serviceProvider.GetRequiredService<DownloadJobProcessor>().StopAsync().GetAwaiter().GetResult();
 
                 pluginManager.UnloadAllPluginsAsync().GetAwaiter().GetResult();
+                miniDB.StopAsync().GetAwaiter().GetResult();
 
                 logger.Log("✅ Shutdown complete.");
             });
