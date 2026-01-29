@@ -369,7 +369,7 @@ namespace SharpPress
                         netReceivedMB = totalBytesReceived / (1024.0 * 1024),
                         activePlugins = pluginsCount,
                         uptime = (DateTime.Now - Process.GetCurrentProcess().StartTime).ToString(@"hh\:mm\:ss"),
-                        users = userService.usersCount
+                        users = userService.Users.Count
                     };
 
                     return Results.Ok(stats);

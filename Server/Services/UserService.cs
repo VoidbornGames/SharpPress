@@ -13,7 +13,8 @@ namespace SharpPress.Services
         private readonly EmailService _emailService;
         private readonly ServerConfig _serverConfig;
         private readonly Logger _logger;
-        public ulong usersCount;
+
+        public List<User> Users { get; set; } = new List<User>();
 
         private readonly IEventBus _eventBus;
 
@@ -43,7 +44,7 @@ namespace SharpPress.Services
             {
                 while (true)
                 {
-                    usersCount = (ulong)_featherDatabase.Count<User>();
+                    Users = _featherDatabase.GetAll<User>();
                     await Task.Delay(TimeSpan.FromMinutes(15));
                 }
             });
@@ -108,11 +109,11 @@ namespace SharpPress.Services
             };
 
             _featherDatabase.SaveData(newUser);
+            Users.Add(newUser);
 
             _logger.Log($"✅ User created: {request.Username}");
             await _eventBus.PublishAsync(new UserRegisteredEvent(newUser));
 
-            usersCount++;
             return (newUser, "User created successfully");
         }
 
@@ -288,8 +289,8 @@ namespace SharpPress.Services
             }
 
             _featherDatabase.Delete<User>(user.Id);
+            Users.Remove(user);
 
-            usersCount--;
             _logger.Log($"✅ User deleted: {username}");
             return (true, "User deleted successfully");
         }

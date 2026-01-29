@@ -19,7 +19,8 @@
     string[] logs = System.IO.File.Exists(logFile) ? System.IO.File.ReadLines(logFile).Reverse().Take(200).Reverse().ToArray() : Array.Empty<string>();
 }
 
-<!-- 1. Status Overview -->
+
+
 <div class="stats-grid">
     <div class="stat-box">
         <div class="stat-label">UpTime</div>
@@ -71,7 +72,7 @@
     </div>
 </div>
 
-<!-- 3. Logs Card -->
+
 <div class="card">
     <div class="card-header">
         <div class="card-title">System Logs</div>

@@ -4,6 +4,14 @@ using SharpPress.Services;
 
 namespace SharpPress.Models
 {
+    public class MySQL_Config
+    {
+        public string host { get; set; } = "localhost";
+        public int port { get; set; } = 3306;
+        public string database_name { get; set; } = "sharppress";
+        public string database_username { get; set; } = "root";
+        public string database_password { get; set; } = "";
+    }
 
     public class SiteSettings
     {
@@ -108,6 +116,7 @@ namespace SharpPress.Models
         public string email_username { get; set; } = "your-smtp-email-username";
         public string email_password { get; set; } = "your-smtp-email-password";
         public bool email_useSsl { get; set; } = false;
+        public MySQL_Config MySQL_Config { get; set; } = new MySQL_Config();
     }
 
     public class LoginRequest

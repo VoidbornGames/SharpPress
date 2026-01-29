@@ -10,12 +10,10 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>@title - SharpPress Admin</title>
 
-    <!-- Dependencies -->
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
 
     <style>
-        /* --- 1. THEME VARIABLES (Deep Space) --- */
         :root {
             --bg-body: #0f172a;
             --bg-sidebar: #161b22;
@@ -39,7 +37,6 @@
             --shadow-glow: 0 0 20px var(--primary-glow);
         }
 
-        /* --- 2. GLOBAL RESET --- */
         *, *::before, *::after {
             box-sizing: border-box;
             margin: 0;
@@ -64,8 +61,6 @@
             list-style: none;
         }
 
-        /* --- 3. AUTH OVERLAY (Login Screen) --- */
-        /* This sits on TOP of everything (z-index 9999) */
         #auth-overlay {
             position: fixed;
             top: 0;
@@ -80,7 +75,6 @@
             transition: transform 0.5s ease-in-out, opacity 0.5s ease-in-out;
         }
 
-            /* When hidden, it slides up off the screen */
             #auth-overlay.hidden {
                 transform: translateY(-100%);
                 opacity: 0;
@@ -202,7 +196,6 @@
                 border: 1px solid rgba(239, 68, 68, 0.2);
             }
 
-        /* --- 4. ADMIN LAYOUT (Protected) --- */
         #admin-interface {
             display: flex;
             height: 100vh;
@@ -312,7 +305,6 @@
             padding: 2.5rem;
         }
 
-        /* Loading Spinner */
         .spinner {
             border: 3px solid rgba(255,255,255,0.1);
             border-left-color: var(--text-white);
@@ -332,7 +324,6 @@
             }
         }
 
-        /* Helper for Logout Button */
         .btn-logout {
             background: rgba(239, 68, 68, 0.1);
             color: var(--danger);
@@ -491,8 +482,6 @@
     </style>
 </head>
 <body>
-
-    <!-- LOGIN OVERLAY (Full Screen) -->
     <div id="auth-overlay">
         <div class="auth-card">
             <div class="auth-header">
@@ -536,9 +525,7 @@
         </div>
     </div>
 
-    <!-- ADMIN INTERFACE (Hidden until logged in) -->
     <div id="admin-interface">
-        <!-- Sidebar -->
         <aside class="sidebar">
             <div class="sidebar-header">
                 <i class="fas fa-cube"></i> SharpPress
@@ -554,19 +541,16 @@
             </ul>
         </aside>
 
-        <!-- Main Content Area -->
         <main class="main-content">
-            <!-- Topbar -->
             <header class="top-bar">
                 <span style="font-weight: 600; font-size: 1.1rem;">@ViewData["Title"]</span>
 
                 <div style="display: flex; align-items: center; gap: 15px;">
-                    <!-- Explicit Logout Button -->
+
                     <button id="logout-btn" class="btn-logout">
                         <i class="fas fa-sign-out-alt"></i> Logout
                     </button>
 
-                    <!-- User Profile -->
                     <div class="user-profile">
                         <div style="display: flex; flex-direction: column; align-items: flex-end;">
                             <span id="user-name" style="font-size: 0.9rem; font-weight: 600;">Admin</span>
@@ -577,7 +561,6 @@
                 </div>
             </header>
 
-            <!-- RenderBody (Child Views) -->
             <div class="content-scroll">
                 @RenderBody()
             </div>
@@ -585,9 +568,6 @@
     </div>
 
     <script>
-        /**
-         * AUTHENTICATION & API MANAGER
-         */
         const Auth = {
             tokenKey: 'sharppress_token',
             userKey: 'sharppress_user',
@@ -622,9 +602,6 @@
             }
         };
 
-        /**
-         * GLOBAL API REQUEST HELPER
-         */
         async function apiRequest(url, options = {}) {
             const token = Auth.getToken();
 
@@ -642,7 +619,7 @@
 
                 if (response.status === 401) {
                     Auth.clearAuth();
-                    window.location.reload(); // Force login view
+                    window.location.reload();
                     throw new Error('Unauthorized');
                 }
 
@@ -655,9 +632,6 @@
 
         window.apiRequest = apiRequest;
 
-        /**
-         * UI CONTROLLER
-         */
         document.addEventListener('DOMContentLoaded', () => {
             const authOverlay = document.getElementById('auth-overlay');
             const adminInterface = document.getElementById('admin-interface');
@@ -669,14 +643,12 @@
             const loginAlertMsg = document.getElementById('login-alert-msg');
             const logoutBtn = document.getElementById('logout-btn');
 
-            // Check Initial State
             if (Auth.isAuthenticated()) {
                 showAdminPanel();
             } else {
                 showLoginScreen();
             }
 
-            // Handle Login Submit
             loginForm.addEventListener('submit', async (e) => {
                 e.preventDefault();
 
@@ -715,10 +687,8 @@
                 }
             });
 
-            // Handle Logout
             logoutBtn.addEventListener('click', () => {
                 Auth.clearAuth();
-                // Reload page to trigger Login Screen
                 window.location.reload();
             });
 

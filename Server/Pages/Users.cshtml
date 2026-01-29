@@ -1,5 +1,6 @@
 ﻿@page "/admin/users"
 @inject SharpPress.Services.FeatherDatabase database
+@inject SharpPress.Services.UserService userService
 
 @{
     Layout = "_AdminLayout";
@@ -23,7 +24,7 @@
                 </tr>
             </thead>
             <tbody>
-                @foreach (var p in database.GetAll<SharpPress.Models.User>())
+                @foreach (var p in userService.Users)
                 {
                     <tr>
                         <td>@p.Username</td>

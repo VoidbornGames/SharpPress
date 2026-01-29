@@ -1,13 +1,10 @@
 ﻿@page "/admin/settings"
-@* @inject SharpPress.Services.SettingsService _settingsService  <-- Example Injection if needed *@
 @{
     Layout = "_AdminLayout";
     ViewData["Title"] = "Settings";
 }
 
-<!-- Page Specific Styles (Extensions for Layout) -->
 <style>
-    /* Tabs Navigation */
     .settings-tabs {
         display: flex;
         gap: 1rem;
@@ -69,7 +66,6 @@
         font-weight: 500;
     }
 
-    /* Reusing layout inputs but ensuring specific width */
     .settings-input {
         width: 100%;
     }
@@ -79,7 +75,6 @@
             box-shadow: 0 0 0 3px rgba(79, 70, 229, 0.15);
         }
 
-    /* Toggle Switch */
     .toggle-row {
         display: flex;
         justify-content: space-between;
@@ -152,7 +147,6 @@
             background-color: white;
         }
 
-    /* Action Bar */
     .action-bar {
         margin-top: 2rem;
         padding-top: 1.5rem;
@@ -195,7 +189,6 @@
             background: var(--primary-hover);
         }
 
-    /* Spinner for button */
     .btn-spinner {
         border: 2px solid rgba(255,255,255,0.3);
         border-radius: 50%;
@@ -216,7 +209,6 @@
         }
     }
 
-    /* Mobile responsive */
     media (max-width: 768px) {
         .settings-grid {
             grid-template-columns: 1fr;
@@ -234,7 +226,6 @@
     </div>
 
     <div class="card-body" style="padding: 2rem;">
-        <!-- Success Message (Hidden by default) -->
         <div id="save-alert" class="alert alert-success" style="display: none; border-left: 4px solid var(--success); background: rgba(16, 185, 129, 0.1); color: var(--success);">
             <i class="fas fa-check-circle"></i> Settings updated successfully.
         </div>
@@ -247,7 +238,6 @@
 
         <form id="settings-form" onsubmit="handleSave(event)">
 
-            <!-- GENERAL TAB -->
             <div id="tab-general" class="tab-content">
                 <div class="settings-grid">
                     <div class="form-group full-width">
@@ -281,7 +271,6 @@
                 </div>
             </div>
 
-            <!-- SECURITY TAB -->
             <div id="tab-security" class="tab-content" style="display: none;">
                 <div class="toggle-row">
                     <div class="toggle-info">
@@ -324,7 +313,6 @@
                 </div>
             </div>
 
-            <!-- ADVANCED TAB -->
             <div id="tab-advanced" class="tab-content" style="display: none;">
                 <div class="alert alert-info" style="margin-bottom: 1.5rem;">
                     <i class="fas fa-info-circle"></i>
@@ -361,7 +349,6 @@
                 </div>
             </div>
 
-            <!-- Action Buttons -->
             <div class="action-bar">
                 <button type="button" class="btn btn-secondary">Cancel</button>
                 <button type="submit" class="btn btn-primary" id="saveBtn">
@@ -375,22 +362,16 @@
 
 @section Scripts {
     <script>
-        // 1. Tab Switching Logic
         function switchTab(tabName) {
-            // Hide all contents
             document.querySelectorAll('.tab-content').forEach(el => el.style.display = 'none');
-            // Remove active class from buttons
             document.querySelectorAll('.tab-btn').forEach(btn => btn.classList.remove('active'));
-
-            // Show selected
             document.getElementById(`tab-${tabName}`).style.display = 'block';
-            // Activate button (find by onclick attribute for simplicity in this static demo)
+
             const btns = Array.from(document.querySelectorAll('.tab-btn'));
             const activeBtn = btns.find(b => b.getAttribute('onclick').includes(tabName));
             if (activeBtn) activeBtn.classList.add('active');
         }
 
-        // 2. Data Fetching (Using your apiRequest pattern)
         async function fetchSettings() {
             try {
                 const response = await apiRequest('/api/settings', { method: 'GET' });
@@ -401,7 +382,6 @@
 
                 const data = await response.json();
 
-                // Populate Form Fields
                 const setVal = (id, val) => {
                     const el = document.getElementById(id);
                     if (el) el.value = val;
@@ -412,7 +392,6 @@
                     if (el) el.checked = val;
                 };
 
-                // Map API data to DOM elements
                 if(data.general) {
                     setVal("siteName", data.general.siteName);
                     setVal("siteDesc", data.general.siteDescription);
@@ -439,7 +418,6 @@
             }
         }
 
-        // 3. Data Saving (Using your apiRequest pattern)
         async function handleSave(event) {
             event.preventDefault();
 
@@ -448,13 +426,11 @@
             const alertBox = document.getElementById('save-alert');
             const btnText = saveBtn.querySelector('span');
 
-            // UI Loading State
             saveBtn.disabled = true;
             btnSpinner.style.display = 'block';
             btnText.textContent = 'Saving...';
             alertBox.style.display = 'none';
 
-            // Gather Data
             const payload = {
                 general: {
                     siteName: document.getElementById('siteName').value,
@@ -483,9 +459,7 @@
                 });
 
                 if (response.ok) {
-                    // Show Success Message
                     alertBox.style.display = 'flex';
-                    // Hide after 3 seconds
                     setTimeout(() => {
                         alertBox.style.display = 'none';
                     }, 3000);
@@ -497,14 +471,12 @@
             } catch (error) {
                 console.error('Error saving settings:', error);
             } finally {
-                // Reset UI State
                 saveBtn.disabled = false;
                 btnSpinner.style.display = 'none';
                 btnText.textContent = 'Save Changes';
             }
         }
 
-        // Initialize
         document.addEventListener('DOMContentLoaded', () => {
             fetchSettings();
             Delau

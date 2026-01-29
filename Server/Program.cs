@@ -1,4 +1,5 @@
-﻿using Newtonsoft.Json;
+﻿using Microsoft.Extensions.DependencyInjection;
+using Newtonsoft.Json;
 using SharpPress.Events;
 using SharpPress.Helpers;
 using SharpPress.Models;
@@ -34,11 +35,10 @@ namespace SharpPress
             builder.Services.AddSingleton(provider => provider.GetRequiredService<ConfigManager>().Config);
             builder.Services.AddSingleton<FilePaths>();
             builder.Services.AddSingleton(provider => new ServerSettings { httpPort = httpPort, sftpPort = sftpPort });
-            builder.Services.AddSingleton(provider => new MiniDB(new MiniDBOptions(), provider.GetRequiredService<Logger>()));
-            builder.Services.AddSingleton<FeatherDatabase>();
             builder.Services.AddSingleton<CacheService>();
             builder.Services.AddSingleton<IEventBus, InMemoryEventBus>();
             builder.Services.AddSingleton<Services.EventHandler>();
+            builder.Services.AddSingleton(provider => new FeatherDatabase(provider.GetRequiredService<Logger>(), provider.GetRequiredService<ConfigManager>().Config.MySQL_Config));
             builder.Services.AddSingleton<UserService>();
             builder.Services.AddSingleton<SftpServer>();
             builder.Services.AddSingleton<WebSocketServer>();
@@ -55,10 +55,8 @@ namespace SharpPress
 
             var logger = serviceProvider.GetRequiredService<Logger>();
             var configManager = serviceProvider.GetRequiredService<ConfigManager>();
-            var miniDB = serviceProvider.GetRequiredService<MiniDB>();
 
             logger.PrepareLogs();
-            await miniDB.StartAsync();
 
             var eventBus = serviceProvider.GetRequiredService<IEventBus>();
             var eventHandler = serviceProvider.GetRequiredService<Services.EventHandler>();
@@ -97,12 +95,10 @@ namespace SharpPress
             {
                 logger.Log("🛑 Shutdown requested...");
 
-                serviceProvider.GetRequiredService<MiniDB>().StopAsync().GetAwaiter().GetResult();
                 serviceProvider.GetRequiredService<SftpServer>().StopAsync().GetAwaiter().GetResult();
                 serviceProvider.GetRequiredService<DownloadJobProcessor>().StopAsync().GetAwaiter().GetResult();
 
                 pluginManager.UnloadAllPluginsAsync().GetAwaiter().GetResult();
-                miniDB.StopAsync().GetAwaiter().GetResult();
 
                 logger.Log("✅ Shutdown complete.");
             });
