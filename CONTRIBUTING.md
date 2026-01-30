@@ -51,6 +51,6 @@
         <li>Keep methods and classes small and focused on a single responsibility.</li>
     </ul>
     <h2 id="license">License</h2>
-    <p>By contributing, you agree that your contributions will be licensed under the same license as the project. Please see the <a href="https://github.com/VoidbornGames/Ultimate_C_Sharp_Server?tab=License-1-ov-file">LICENSE</a> file for details.</p>
+    <p>By contributing, you agree that your contributions will be licensed under the same license as the project. Please see the <a href="https://github.com/VoidbornGames/SharpPress?tab=License-1-ov-file">LICENSE</a> file for details.</p>
     <h2 id="community">Community</h2>
     <p>We strive to create a welcoming and inclusive community. Please be respectful and constructive in all interactions. Thank you for contributing!</p>
