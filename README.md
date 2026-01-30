@@ -84,6 +84,7 @@ public class TestPlugin : IPlugin
 5. Open a Pull Request
 
 ## 📄 License
-### SharpPress is released under the MIT License. See the LICENSE file for details.
+### SharpPress is released under the MIT License. See the [LICENSE](LICENSE) file for details.
 
-Built with ❤️ by Alireza Janaki and contributors.
+
+**Built with ❤️ by Alireza Janaki and contributors.**
