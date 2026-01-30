@@ -2,7 +2,7 @@
     <p>We welcome contributions to SharpPress! This guide will help you get started. Whether you're fixing a bug, implementing a new feature, or improving documentation, your help is appreciated.</p>
     <h2 id="how-to-contribute">How to Contribute</h2>
     <h3 id="reporting-bugs">Reporting Bugs</h3>
-    <p>If you find a bug, please report it by creating an issue on our <a href="https://github.com/VoidbornGames/Ultimate_C_Sharp_Server/issues">GitHub Issues</a> page.</p>
+    <p>If you find a bug, please report it by creating an issue on our <a href="https://github.com/VoidbornGames/SharpPress/issues">GitHub Issues</a> page.</p>
     <p>A good bug report includes:</p>
     <ul>
         <li>A clear and descriptive title.</li>
