@@ -57,9 +57,7 @@ namespace SharpPress.Services
 
             if (mappings.Any())
             {
-                usersFolders = new ConcurrentDictionary<string, string>(
-                    mappings.ToDictionary(x => x.Username, x => x.FolderPath)
-                );
+                usersFolders = new ConcurrentDictionary<string, string>(mappings.ToDictionary(x => x.Username, x => x.FolderPath));
                 _logger.Log($"✅ Loaded {mappings.Count} SFTP mappings from database.");
             }
             else
@@ -79,8 +77,9 @@ namespace SharpPress.Services
                 if (!usersFolders.ContainsKey("admin"))
                 {
                     var adminMapping = new SftpMapping { Username = "admin", FolderPath = "/" };
-                    _featherDatabase.SaveData(adminMapping);
+                    
                     usersFolders["admin"] = "/";
+                    _featherDatabase.SaveData(adminMapping);
                 }
 
                 _ = Task.Run(async () =>

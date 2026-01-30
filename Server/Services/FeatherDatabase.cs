@@ -18,54 +18,60 @@ namespace SharpPress.Services
         public FeatherDatabase(Logger logger, MySQL_Config mySQL_Config)
         {
             _logger = logger;
-
-            var serverBuilder = new MySqlConnectionStringBuilder
+            try
             {
-                Server = mySQL_Config.host,
-                Port = (uint)mySQL_Config.port,
-                UserID = mySQL_Config.database_username,
-                Password = mySQL_Config.database_password,
-                SslMode = MySqlSslMode.Preferred,
-                Pooling = false,
-                ConnectionTimeout = 5,
-                DefaultCommandTimeout = 30,
-                AllowUserVariables = false
-            };
+                var serverBuilder = new MySqlConnectionStringBuilder
+                {
+                    Server = mySQL_Config.host,
+                    Port = (uint)mySQL_Config.port,
+                    UserID = mySQL_Config.database_username,
+                    Password = mySQL_Config.database_password,
+                    SslMode = MySqlSslMode.Preferred,
+                    Pooling = false,
+                    ConnectionTimeout = 5,
+                    DefaultCommandTimeout = 30,
+                    AllowUserVariables = false
+                };
 
-            using (var serverConnection = new MySqlConnection(serverBuilder.ConnectionString))
-            {
-                serverConnection.Open();
+                using (var serverConnection = new MySqlConnection(serverBuilder.ConnectionString))
+                {
+                    serverConnection.Open();
 
-                using var cmd = serverConnection.CreateCommand();
-                cmd.CommandText =
-                    $"CREATE DATABASE IF NOT EXISTS `{mySQL_Config.database_name}` " +
-                    "CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci";
+                    using var cmd = serverConnection.CreateCommand();
+                    cmd.CommandText =
+                        $"CREATE DATABASE IF NOT EXISTS `{mySQL_Config.database_name}` " +
+                        "CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci";
 
-                cmd.ExecuteNonQuery();
+                    cmd.ExecuteNonQuery();
+                }
+
+                var builder = new MySqlConnectionStringBuilder
+                {
+                    Server = mySQL_Config.host,
+                    Port = (uint)mySQL_Config.port,
+                    Database = mySQL_Config.database_name,
+                    UserID = mySQL_Config.database_username,
+                    Password = mySQL_Config.database_password,
+                    SslMode = MySqlSslMode.Preferred,
+                    Pooling = true,
+                    MinimumPoolSize = 0,
+                    MaximumPoolSize = 100,
+                    ConnectionTimeout = 5,
+                    DefaultCommandTimeout = 30,
+                    AllowUserVariables = false
+                };
+
+                _connectionString = builder.ConnectionString;
+
+                using var connection = new MySqlConnection(_connectionString);
+                connection.Open();
+
+                _logger.Log($"💾 FeatherDatabase connected to MySQL {mySQL_Config.host}:{mySQL_Config.port}/{mySQL_Config.database_name}");
             }
-
-            var builder = new MySqlConnectionStringBuilder
+            catch(Exception ex)
             {
-                Server = mySQL_Config.host,
-                Port = (uint)mySQL_Config.port,
-                Database = mySQL_Config.database_name,
-                UserID = mySQL_Config.database_username,
-                Password = mySQL_Config.database_password,
-                SslMode = MySqlSslMode.Preferred,
-                Pooling = true,
-                MinimumPoolSize = 0,
-                MaximumPoolSize = 100,
-                ConnectionTimeout = 5,
-                DefaultCommandTimeout = 30,
-                AllowUserVariables = false
-            };
-
-            _connectionString = builder.ConnectionString;
-
-            using var connection = new MySqlConnection(_connectionString);
-            connection.Open();
-
-            _logger.Log($"💾 FeatherDatabase connected to MySQL {mySQL_Config.host}:{mySQL_Config.port}/{mySQL_Config.database_name}");
+                _logger.LogError($"Error connecting to MySQL: {ex.Message}");
+            }
         }
 
         public void CreateTable<T>() where T : new()

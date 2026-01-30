@@ -102,6 +102,7 @@ namespace SharpPress.Models
     public class ServerConfig
     {
         public bool DebugMode { get; set; } = false;
+        public string ADMIN_PASSWORD { get; set; } = "admin123";
         public string JwtSecret { get; set; } = "your-super-secret-jwt-key-change-this-in-production-32-chars-min";
         public SiteSettings SiteSettings { get; set; }
         public string PanelDomain { get; set; } = "example.com";

@@ -15,6 +15,7 @@
 
     <style>
         :root {
+            --accent: #8b5cf6;
             --bg-body: #0f172a;
             --bg-sidebar: #161b22;
             --bg-card: #1e293b;
@@ -479,6 +480,8 @@
             border-left: 4px solid var(--danger);
         }
 
+        .logo { color: white; }
+        .logo span { color: var(--accent); }
     </style>
 </head>
 <body>
@@ -486,7 +489,7 @@
         <div class="auth-card">
             <div class="auth-header">
                 <i class="fas fa-server"></i>
-                <h1>SharpPress</h1>
+                <div class="logo">Sharp<span>Press</span></div>
                 <p>Admin Authentication</p>
             </div>
 
@@ -528,7 +531,7 @@
     <div id="admin-interface">
         <aside class="sidebar">
             <div class="sidebar-header">
-                <i class="fas fa-cube"></i> SharpPress
+                <div class="logo">Sharp<span>Press</span></div>
             </div>
             <ul class="sidebar-menu">
                 <li><a href="/admin" class="menu-item"><i class="fas fa-chart-line"></i> Dashboard</a></li>

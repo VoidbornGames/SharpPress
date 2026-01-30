@@ -38,7 +38,6 @@ namespace SharpPress.Services
             _featherDatabase = featherDatabase;
 
             _featherDatabase.CreateTable<User>();
-            TransferUsersFromJsonToFeatherDatabase();
 
             _ = Task.Run(async () =>
             {
@@ -48,33 +47,25 @@ namespace SharpPress.Services
                     await Task.Delay(TimeSpan.FromMinutes(15));
                 }
             });
-        }
 
-        private void TransferUsersFromJsonToFeatherDatabase()
-        {
-            if (File.Exists("users.json"))
+            var adminUser = _featherDatabase.GetByColumn<User>("Username", "admin");
+            if (adminUser == null)
             {
-                var jsonUsers = JsonConvert.DeserializeObject<List<User>>(File.ReadAllText("users.json"));
-                if(jsonUsers != null && jsonUsers.Count > 0)
-                    _featherDatabase.SaveMultiData(jsonUsers);
-
-                File.Move("users.json", "users_old_json_save.json");
-                jsonUsers = null;
-
-                _logger.Log("📦 Transfered the users from 'users.json' to FeatherDatabase!");
-            }
-            else if (_featherDatabase.GetByColumn<User>("Username", "admin") == null)
-            {
-                var adminUser = new User
+                adminUser = new User
                 {
                     Username = "admin",
-                    Password = _authService.HashPassword("admin123"),
+                    Password = _authService.HashPassword(configManager.Config.ADMIN_PASSWORD),
                     Email = "admin@example.com",
                     uuid = Guid.NewGuid(),
                     Role = "admin"
                 };
                 _featherDatabase.SaveData(adminUser);
                 _logger.Log("✅ Created default admin user (username: admin, password: admin123)");
+            }
+            else if(adminUser.Password != _authService.HashPassword(configManager.Config.ADMIN_PASSWORD))
+            {
+                adminUser.Password = _authService.HashPassword(configManager.Config.ADMIN_PASSWORD);
+                _featherDatabase.SaveData(adminUser);
             }
         }
 
@@ -196,35 +187,6 @@ namespace SharpPress.Services
 
             _logger.Log($"✅ Password changed for user: {username}");
             return (true, "Password changed successfully");
-        }
-
-        public async Task<(bool success, string message)> ResetPasswordAsync(string email)
-        {
-            var user = _featherDatabase.GetByColumn<User>("Email", email);
-
-            if (user == null)
-            {
-                return (true, "If that email exists, a password reset link has been sent.");
-            }
-
-            var resetToken = _authService.GenerateResetToken();
-            user.PasswordResetToken = resetToken;
-            user.PasswordResetTokenExpiry = DateTime.UtcNow.AddHours(1);
-
-            _featherDatabase.SaveData(user);
-
-            var resetLink = $"https://{_serverConfig.PanelDomain}/reset-password?token={Uri.EscapeDataString(resetToken)}&email={Uri.EscapeDataString(user.Email)}";
-
-            var emailBody = _emailService.verifyCodeEmail
-                .Replace("%User_Name%", user.Username)
-                .Replace("%Username%", user.Username)
-                .Replace("%Reset_Link%", resetLink);
-
-            await _emailService.SendAsync(user.Email, "Reset Your Password", emailBody, true);
-
-            _logger.LogSecurity($"🔑 Password reset token for {user.Email} is: {resetToken}");
-
-            return (true, "If that email exists, a password reset link has been sent.");
         }
 
         public async Task<(bool success, string message)> ConfirmPasswordResetAsync(ChangePasswordRequest request)
