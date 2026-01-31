@@ -5,7 +5,7 @@
 ![MySQL](https://img.shields.io/badge/MySQL-8.0-blue.svg)
 ![Architecture](https://img.shields.io/badge/Modular-100-red.svg)
 
-A modern, highly modular content management system and web platform built with C# and .NET technologies. Designed with Modular architecture, extensible plugin support, and production-grade performance in mind, SharpPress provides developers with a flexible foundation for building everything from simple blogs and websites to complex enterprise web applications.
+A Modern Hybrid Headless CMS, highly modular content management system and web platform built with C# and .NET technologies. Designed with Modular architecture, extensible plugin support, and production-grade performance in mind, SharpPress provides developers with a flexible foundation for building everything from simple blogs and websites to complex enterprise web applications.
 
 ## ✨ Key Features
 
