@@ -5,7 +5,6 @@ using SharpPress.Helpers;
 using SharpPress.Models;
 using SharpPress.Servers;
 using SharpPress.Services;
-using System.Text;
 
 namespace SharpPress
 {

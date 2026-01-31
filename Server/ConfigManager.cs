@@ -18,7 +18,7 @@ namespace SharpPress.Services
             _logger = logger ?? new Logger();
             LoadConfig();
 
-            Endpoints.cacheStaticFiles = Config.EnableStaticFileCache;
+            Endpoints.SetCacheEnabled(Config.EnableStaticFileCache);
         }
 
         private void LoadConfig()

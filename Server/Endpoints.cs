@@ -4,23 +4,40 @@ using Microsoft.AspNetCore.StaticFiles;
 using Newtonsoft.Json;
 using SharpPress.Helpers;
 using SharpPress.Models;
-using SharpPress.Pages;
 using SharpPress.Services;
 using System.Collections.Concurrent;
 using System.Diagnostics;
 using System.Net.NetworkInformation;
 using System.Text;
+using System.IO.Compression;
+using System.Security.Cryptography;
 
 namespace SharpPress
 {
     public static class Endpoints
     {
-        public static bool cacheStaticFiles = true;
+        private static readonly ConcurrentDictionary<string, CachedFile> _fileCache = new();
+        private static readonly ConcurrentDictionary<string, int> _readCounts = new();
+        private static readonly FileExtensionContentTypeProvider _contentTypeProvider = new();
+        private static readonly HashSet<string> _compressibleTypes = new(StringComparer.OrdinalIgnoreCase)
+        {
+            "text/html", "text/css", "text/javascript", "application/javascript",
+            "application/json", "application/xml", "text/xml", "text/plain",
+            "image/svg+xml", "application/x-javascript"
+        };
 
-        private static ConcurrentDictionary<string, byte[]> _fileCache = new ConcurrentDictionary<string, byte[]>();
-        private static ConcurrentDictionary<string, int> _readCounts = new ConcurrentDictionary<string, int>();
+        private static readonly HashSet<string> _cacheableExtensions = new(StringComparer.OrdinalIgnoreCase)
+        {
+            ".html", ".css", ".js", ".json", ".svg", ".xml", ".txt",
+            ".jpg", ".jpeg", ".png", ".gif", ".webp", ".ico", ".woff", ".woff2", ".ttf", ".eot"
+        };
+
+        private static bool _cacheEnabled = true;
+        private const int CACHE_THRESHOLD_READS = 10;
+        private const int MAX_CACHE_SIZE_MB = 100;
+        private const long MAX_FILE_SIZE_FOR_CACHE = 5 * 1024 * 1024;
+        private static long _currentCacheSize = 0;
         private static double _lastCpuUsage = 0;
-
 
         static Endpoints()
         {
@@ -49,15 +66,38 @@ namespace SharpPress
 
             _ = Task.Run(async () =>
             {
-                _readCounts.Clear();
-                await Task.Delay(TimeSpan.FromSeconds(60));
+                while (true)
+                {
+                    await Task.Delay(TimeSpan.FromSeconds(60));
+                    _readCounts.Clear();
+                }
             });
 
             _ = Task.Run(async () =>
             {
-                _fileCache.Clear();
-                await Task.Delay(TimeSpan.FromMinutes(30));
+                while (true)
+                {
+                    await Task.Delay(TimeSpan.FromMinutes(30));
+                    _fileCache.Clear();
+                    _currentCacheSize = 0;
+                }
             });
+        }
+
+        public static void SetCacheEnabled(bool enabled)
+        {
+            _cacheEnabled = enabled;
+            if (!enabled)
+            {
+                ClearCache();
+            }
+        }
+
+        public static void ClearCache()
+        {
+            _fileCache.Clear();
+            _readCounts.Clear();
+            _currentCacheSize = 0;
         }
 
         public static void Map(WebApplication app, PluginManager pluginManager)
@@ -70,7 +110,6 @@ namespace SharpPress
                 return authService.ValidateJwtToken(token) && authService.GetRoleFromToken(token).ToLower() == "admin";
             }
 
-            // --- /api/login ---
             app.MapPost("/api/login", async (
                 [FromBody] LoginRequest loginRequest,
                 UserService userService,
@@ -95,7 +134,6 @@ namespace SharpPress
                 return Results.Unauthorized();
             });
 
-            // --- /api/register ---
             app.MapPost("/api/register", async (
                 [FromBody] RegisterRequest registerRequest,
                 UserService userService,
@@ -120,7 +158,6 @@ namespace SharpPress
                 return Results.BadRequest(new { success = false, message });
             });
 
-            // --- /api/plugins ---
             app.MapGet("/api/plugins", (
                 HttpRequest request,
                 [FromServices] AuthenticationService authService) =>
@@ -139,7 +176,6 @@ namespace SharpPress
                 return Results.Ok(new { success = true, plugins = pluginList });
             });
 
-            // --- /api/plugins/upload ---
             app.MapPost("/api/plugins/upload", async (
                 HttpRequest request,
                 PackageManager packageManager,
@@ -206,7 +242,6 @@ namespace SharpPress
                 }
             });
 
-            // --- /api/plugins/reload ---
             app.MapPost("/api/plugins/reload", async (
                 HttpRequest request,
                 [FromServices] AuthenticationService authService) =>
@@ -217,7 +252,6 @@ namespace SharpPress
                 return Results.Ok(new { success = true, message = "Plugins reloaded successfully." });
             });
 
-            // --- /api/market/plugins ---
             app.MapGet("/api/market/plugins", async (
                 HttpRequest request,
                 [FromServices] AuthenticationService authService) =>
@@ -254,7 +288,6 @@ namespace SharpPress
                 }
             });
 
-            // --- /api/marketplace/download ---
             app.MapPost("/api/marketplace/download", async (
                 HttpRequest request,
                 [FromBody] MarketPlugin downloadRequest,
@@ -273,7 +306,6 @@ namespace SharpPress
                 return Results.Accepted(null, new { success = true, message = $"Download request for '{downloadRequest.Name}.dll' has been queued and will be processed." });
             });
 
-            // --- /videos/{filename} ---
             app.MapGet("/videos/{filename}", (string filename, [FromServices] VideoService videoService) =>
             {
                 string filePath = videoService.GetVideoFilePath(filename);
@@ -380,30 +412,97 @@ namespace SharpPress
                 }
             });
 
+            app.MapGet("/api/cache/stats", (
+                HttpRequest request,
+                [FromServices] AuthenticationService authService) =>
+            {
+                if (!ValidateAdmin(request, authService))
+                    return Results.Unauthorized();
+
+                var stats = GetCacheStats();
+                return Results.Ok(stats);
+            });
+
+            app.MapPost("/api/cache/clear", (
+                HttpRequest request,
+                [FromServices] AuthenticationService authService,
+                Logger logger) =>
+            {
+                if (!ValidateAdmin(request, authService))
+                    return Results.Unauthorized();
+
+                ClearCache();
+                logger.Log("🗑️ Cache cleared by admin.");
+                return Results.Ok(new { success = true, message = "Cache cleared successfully." });
+            });
+
             app.MapFallback("{*path}", async (HttpContext context, ILogger<Program> logger) =>
             {
                 var rootPath = Path.Combine(AppContext.BaseDirectory, "public_html");
-                if (!Directory.Exists(rootPath)) Directory.CreateDirectory(rootPath);
+                if (!Directory.Exists(rootPath))
+                {
+                    Directory.CreateDirectory(rootPath);
+                }
 
                 var requestPath = context.Request.Path.Value?.TrimStart('/');
-                if (string.IsNullOrEmpty(requestPath)) requestPath = "index.html";
-                if (requestPath.EndsWith('/')) requestPath = requestPath.TrimEnd('/');
+                if (string.IsNullOrEmpty(requestPath))
+                {
+                    requestPath = "index.html";
+                }
+
+                requestPath = requestPath.TrimEnd('/');
+                if (IsSuspiciousPath(requestPath))
+                {
+                    logger.LogWarning($"[StaticHandler] Suspicious path rejected: {requestPath}");
+                    context.Response.StatusCode = 403;
+                    await context.Response.WriteAsync("Forbidden");
+                    return;
+                }
 
                 var filePath = Path.Combine(rootPath, requestPath);
-                if (await ServeFile(context, filePath, requestPath)) return;
+
+                if (await ServeFile(context, filePath, requestPath))
+                {
+                    LogFileAccess(logger, requestPath, context.Response.StatusCode);
+                    return;
+                }
 
                 if (!Path.HasExtension(requestPath))
                 {
-                    var indexPath = Path.Combine(rootPath, requestPath, "index.html");
-                    if (await ServeFile(context, indexPath, requestPath + "/")) return;
+                    var htmlPath = filePath + ".html";
+                    if (await ServeFile(context, htmlPath, requestPath + ".html"))
+                    {
+                        LogFileAccess(logger, requestPath + ".html", context.Response.StatusCode);
+                        return;
+                    }
+                }
+
+                if (!Path.HasExtension(requestPath))
+                {
+                    var indexPath = Path.Combine(filePath, "index.html");
+                    if (await ServeFile(context, indexPath, requestPath + "/index.html"))
+                    {
+                        LogFileAccess(logger, requestPath + "/index.html", context.Response.StatusCode);
+                        return;
+                    }
+                }
+
+                if (!Path.HasExtension(requestPath) && !requestPath.StartsWith("api/"))
+                {
+                    var spaIndexPath = Path.Combine(rootPath, "index.html");
+                    if (File.Exists(spaIndexPath))
+                    {
+                        if (await ServeFile(context, spaIndexPath, "index.html"))
+                        {
+                            logger.LogInformation($"[StaticHandler] SPA fallback: {requestPath} -> index.html");
+                            return;
+                        }
+                    }
                 }
 
                 logger.LogWarning($"[StaticHandler] 404 Not Found: {requestPath}");
-                context.Response.StatusCode = 404;
-                context.Response.ContentType = "text/html";
-                await context.Response.WriteAsync("<div style='text-align: center; color: #ccc; font-family: sans-serif; padding-top: 50px;'><h1>404</h1><h3>File Not Found</h3><p>SharpPress</p></div>");
+                await Serve404Page(context, rootPath);
             });
-
 
             app.MapGet("/api/settings", async (
                 HttpRequest request,
@@ -437,12 +536,11 @@ namespace SharpPress
                     }
                 };
 
-                if(configManager.Config.SiteSettings != null)
+                if (configManager.Config.SiteSettings != null)
                     defaultSettings = configManager.Config.SiteSettings;
 
                 return Results.Ok(defaultSettings);
             });
-
 
             app.MapPost("/api/settings", async (
                 HttpRequest request,
@@ -459,7 +557,7 @@ namespace SharpPress
                 {
                     configManager.Config.SiteSettings = settings;
                     if (configManager.Config.SiteSettings.Advanced != null)
-                        cacheStaticFiles = configManager.Config.SiteSettings.Advanced.EnableCache;
+                        SetCacheEnabled(configManager.Config.SiteSettings.Advanced.EnableCache);
 
                     await configManager.SaveConfig();
 
@@ -474,71 +572,411 @@ namespace SharpPress
             });
         }
 
+        private static bool IsSuspiciousPath(string path)
+        {
+            if (string.IsNullOrEmpty(path))
+                return false;
+
+            var suspicious = new[]
+            {
+                "..",          
+                "~",           
+                "/etc/",    
+                "/proc/",    
+                "/sys/",   
+                "\\\\",         
+                ".env",         
+                ".git",
+                "web.config",   
+                "appsettings",  
+            };
+
+            var lowerPath = path.ToLowerInvariant();
+            return suspicious.Any(s => lowerPath.Contains(s));
+        }
+
+        private static void LogFileAccess(ILogger logger, string path, int statusCode)
+        {
+            if (statusCode == 304)
+            {
+                logger.LogDebug($"[StaticHandler] 304 Not Modified: {path}");
+            }
+            else if (statusCode == 200)
+            {
+                logger.LogDebug($"[StaticHandler] 200 OK: {path}");
+            }
+        }
+
+        private static async Task Serve404Page(HttpContext context, string rootPath)
+        {
+            context.Response.StatusCode = 404;
+            context.Response.ContentType = "text/html; charset=utf-8";
+
+            var custom404Path = Path.Combine(rootPath, "404.html");
+            if (File.Exists(custom404Path))
+            {
+                var content = await File.ReadAllTextAsync(custom404Path);
+                await context.Response.WriteAsync(content);
+                return;
+            }
+
+            await context.Response.WriteAsync(@"
+<!DOCTYPE html>
+<html lang='en'>
+<head>
+    <meta charset='UTF-8'>
+    <meta name='viewport' content='width=device-width, initial-scale=1.0'>
+    <title>404 - Page Not Found</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            color: white;
+        }
+        .container {
+            text-align: center;
+            padding: 2rem;
+        }
+        h1 {
+            font-size: 8rem;
+            font-weight: 700;
+            margin-bottom: 1rem;
+            text-shadow: 2px 2px 4px rgba(0,0,0,0.2);
+        }
+        h2 {
+            font-size: 2rem;
+            font-weight: 400;
+            margin-bottom: 1rem;
+        }
+        p {
+            font-size: 1.2rem;
+            opacity: 0.9;
+            margin-bottom: 2rem;
+        }
+        a {
+            display: inline-block;
+            padding: 1rem 2rem;
+            background: white;
+            color: #667eea;
+            text-decoration: none;
+            border-radius: 50px;
+            font-weight: 600;
+            transition: transform 0.3s ease, box-shadow 0.3s ease;
+            box-shadow: 0 4px 15px rgba(0,0,0,0.2);
+        }
+        a:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 6px 20px rgba(0,0,0,0.3);
+        }
+        .footer {
+            margin-top: 3rem;
+            opacity: 0.7;
+            font-size: 0.9rem;
+        }
+    </style>
+</head>
+<body>
+    <div class='container'>
+        <h1>404</h1>
+        <h2>Page Not Found</h2>
+        <p>The page you're looking for doesn't exist or has been moved.</p>
+        <a href='/'>Go Home</a>
+        <div class='footer'>
+            <p>SharpPress</p>
+        </div>
+    </div>
+</body>
+</html>");
+        }
+
         private static async Task<bool> ServeFile(HttpContext context, string filePath, string relativePath)
         {
-            if (!File.Exists(filePath)) return false;
+            if (!File.Exists(filePath))
+                return false;
 
             var fullPath = Path.GetFullPath(filePath);
             var rootPath = Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "public_html"));
 
-            if (!fullPath.StartsWith(rootPath))
+            if (!fullPath.StartsWith(rootPath, StringComparison.OrdinalIgnoreCase))
             {
-                return false;
+                context.Response.StatusCode = 403;
+                return true;
             }
 
-            var contentType = new FileExtensionContentTypeProvider();
-            string ct;
-            if (!contentType.TryGetContentType(filePath, out ct)) ct = "application/octet-stream";
+            var fileInfo = new FileInfo(filePath);
+            var lastModified = fileInfo.LastWriteTimeUtc;
+            var fileSize = fileInfo.Length;
 
-            context.Response.ContentType = ct;
+            if (!_contentTypeProvider.TryGetContentType(filePath, out var contentType))
+                contentType = "application/octet-stream";
 
-            var ext = Path.GetExtension(filePath).ToLowerInvariant();
+            context.Response.ContentType = contentType;
 
-            if (_fileCache.ContainsKey(relativePath))
+            var etag = GenerateETag(filePath, lastModified, fileSize);
+            context.Response.Headers["ETag"] = etag;
+
+            var requestETag = context.Request.Headers["If-None-Match"].ToString();
+            if (!string.IsNullOrEmpty(requestETag) && requestETag == etag)
             {
-                await context.Response.Body.WriteAsync(_fileCache[relativePath]);
+                context.Response.StatusCode = 304;
+                return true;
             }
-            else
+
+            var ifModifiedSince = context.Request.Headers["If-Modified-Since"].ToString();
+            if (!string.IsNullOrEmpty(ifModifiedSince) &&
+                DateTime.TryParse(ifModifiedSince, out var modifiedSince))
             {
-                if (IsTextFile(filePath))
+                if (lastModified <= modifiedSince.ToUniversalTime())
                 {
-                    var content = await File.ReadAllTextAsync(filePath);
-                    await context.Response.WriteAsync(content);
+                    context.Response.StatusCode = 304; 
+                    return true;
+                }
+            }
 
-                    if (cacheStaticFiles && _readCounts.AddOrUpdate(relativePath, 1, (k, v) => v + 1) >= 10)
-                    {
-                        _fileCache[relativePath] = Encoding.UTF8.GetBytes(content);
-                    }
+            SetCacheHeaders(context, Path.GetExtension(filePath));
+
+            context.Response.Headers["Last-Modified"] = lastModified.ToString("R");
+
+            var acceptEncoding = context.Request.Headers["Accept-Encoding"].ToString();
+            var supportsGzip = acceptEncoding.Contains("gzip", StringComparison.OrdinalIgnoreCase);
+            var supportsBrotli = acceptEncoding.Contains("br", StringComparison.OrdinalIgnoreCase);
+
+            if (_cacheEnabled && _fileCache.TryGetValue(relativePath, out var cachedFile))
+            {
+                if (cachedFile.LastModified == lastModified)
+                {
+                    return await ServeCachedFile(context, cachedFile, supportsBrotli, supportsGzip);
                 }
                 else
                 {
-                    await context.Response.SendFileAsync(filePath);
+                    RemoveFromCache(relativePath, cachedFile.OriginalSize);
                 }
+            }
+
+            var readCount = _readCounts.AddOrUpdate(relativePath, 1, (k, v) => v + 1);
+
+            return await ServeAndCacheFile(context, filePath, relativePath, fileSize, lastModified,
+                contentType, readCount, supportsBrotli, supportsGzip);
+        }
+
+        private static async Task<bool> ServeCachedFile(HttpContext context, CachedFile cachedFile,
+            bool supportsBrotli, bool supportsGzip)
+        {
+            byte[] dataToSend = cachedFile.OriginalData;
+            string encoding = null;
+
+            if (supportsBrotli && cachedFile.BrotliData != null)
+            {
+                dataToSend = cachedFile.BrotliData;
+                encoding = "br";
+            }
+            else if (supportsGzip && cachedFile.GzipData != null)
+            {
+                dataToSend = cachedFile.GzipData;
+                encoding = "gzip";
+            }
+
+            if (encoding != null)
+            {
+                context.Response.Headers["Content-Encoding"] = encoding;
+            }
+
+            context.Response.ContentLength = dataToSend.Length;
+            await context.Response.Body.WriteAsync(dataToSend);
+            return true;
+        }
+
+        private static async Task<bool> ServeAndCacheFile(HttpContext context, string filePath,
+            string relativePath, long fileSize, DateTime lastModified, string contentType,
+            int readCount, bool supportsBrotli, bool supportsGzip)
+        {
+            var shouldCompress = _compressibleTypes.Contains(contentType) && fileSize > 1024;
+            var shouldCache = _cacheEnabled &&
+                              _cacheableExtensions.Contains(Path.GetExtension(filePath)) &&
+                              fileSize <= MAX_FILE_SIZE_FOR_CACHE &&
+                              readCount >= CACHE_THRESHOLD_READS &&
+                              _currentCacheSize < (MAX_CACHE_SIZE_MB * 1024 * 1024);
+
+            if (!shouldCache && !shouldCompress)
+            {
+                await context.Response.SendFileAsync(filePath);
+                return true;
+            }
+
+            byte[] fileContent = await File.ReadAllBytesAsync(filePath);
+            byte[] dataToSend = fileContent;
+            string encoding = null;
+
+            if (shouldCompress)
+            {
+                if (supportsBrotli)
+                {
+                    var compressed = await CompressBrotli(fileContent);
+                    if (compressed.Length < fileContent.Length * 0.9)
+                    {
+                        dataToSend = compressed;
+                        encoding = "br";
+                    }
+                }
+                else if (supportsGzip)
+                {
+                    var compressed = await CompressGzip(fileContent);
+                    if (compressed.Length < fileContent.Length * 0.9)
+                    {
+                        dataToSend = compressed;
+                        encoding = "gzip";
+                    }
+                }
+            }
+
+            if (encoding != null)
+            {
+                context.Response.Headers["Content-Encoding"] = encoding;
+            }
+
+            context.Response.ContentLength = dataToSend.Length;
+            await context.Response.Body.WriteAsync(dataToSend);
+
+            if (shouldCache && !_fileCache.ContainsKey(relativePath))
+            {
+                await CacheFile(relativePath, fileContent, lastModified, contentType);
             }
 
             return true;
         }
 
-        private static bool IsTextFile(string path)
+        private static async Task CacheFile(string relativePath, byte[] originalData,
+            DateTime lastModified, string contentType)
         {
-            try
+            var cachedFile = new CachedFile
             {
-                using (var fs = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read, 4096, FileOptions.SequentialScan))
-                {
-                    byte[] buffer = new byte[1024];
-                    int bytesRead = fs.Read(buffer, 0, buffer.Length);
+                OriginalData = originalData,
+                LastModified = lastModified,
+                ContentType = contentType,
+                OriginalSize = originalData.Length
+            };
 
-                    for (int i = 0; i < bytesRead; i++)
-                    {
-                        if (buffer[i] == 0) return false;
-                    }
-                }
-                return true;
-            }
-            catch
+            if (_compressibleTypes.Contains(contentType) && originalData.Length > 1024)
             {
-                return false;
+                cachedFile.GzipData = await CompressGzip(originalData);
+                cachedFile.BrotliData = await CompressBrotli(originalData);
             }
+
+            var totalSize = cachedFile.OriginalSize +
+                           (cachedFile.GzipData?.Length ?? 0) +
+                           (cachedFile.BrotliData?.Length ?? 0);
+
+            if (_currentCacheSize + totalSize <= (MAX_CACHE_SIZE_MB * 1024 * 1024))
+            {
+                if (_fileCache.TryAdd(relativePath, cachedFile))
+                {
+                    Interlocked.Add(ref _currentCacheSize, totalSize);
+                }
+            }
+        }
+
+        private static void RemoveFromCache(string relativePath, long size)
+        {
+            if (_fileCache.TryRemove(relativePath, out var removed))
+            {
+                var totalSize = removed.OriginalSize +
+                               (removed.GzipData?.Length ?? 0) +
+                               (removed.BrotliData?.Length ?? 0);
+                Interlocked.Add(ref _currentCacheSize, -totalSize);
+            }
+        }
+
+        private static async Task<byte[]> CompressGzip(byte[] data)
+        {
+            using var output = new MemoryStream();
+            using (var gzip = new GZipStream(output, CompressionLevel.Optimal))
+            {
+                await gzip.WriteAsync(data);
+            }
+            return output.ToArray();
+        }
+
+        private static async Task<byte[]> CompressBrotli(byte[] data)
+        {
+            using var output = new MemoryStream();
+            using (var brotli = new BrotliStream(output, CompressionLevel.Optimal))
+            {
+                await brotli.WriteAsync(data);
+            }
+            return output.ToArray();
+        }
+
+        private static string GenerateETag(string filePath, DateTime lastModified, long fileSize)
+        {
+            var input = $"{filePath}:{lastModified.Ticks}:{fileSize}";
+            var hash = SHA256.HashData(Encoding.UTF8.GetBytes(input));
+            return $"\"{Convert.ToBase64String(hash).Substring(0, 16)}\"";
+        }
+
+        private static void SetCacheHeaders(HttpContext context, string extension)
+        {
+            var response = context.Response;
+
+            switch (extension.ToLowerInvariant())
+            {
+                case ".woff":
+                case ".woff2":
+                case ".ttf":
+                case ".eot":
+                    response.Headers["Cache-Control"] = "public, max-age=31536000, immutable";
+                    break;
+
+                case ".jpg":
+                case ".jpeg":
+                case ".png":
+                case ".gif":
+                case ".webp":
+                case ".svg":
+                case ".ico":
+                    response.Headers["Cache-Control"] = "public, max-age=86400";
+                    break;
+
+                case ".css":
+                case ".js":
+                    response.Headers["Cache-Control"] = "public, max-age=3600";
+                    break;
+
+                case ".html":
+                case ".htm":
+                    response.Headers["Cache-Control"] = "no-cache, must-revalidate";
+                    break;
+
+                default:
+                    response.Headers["Cache-Control"] = "public, max-age=3600";
+                    break;
+            }
+        }
+
+        public static Dictionary<string, object> GetCacheStats()
+        {
+            return new Dictionary<string, object>
+            {
+                { "cachedFiles", _fileCache.Count },
+                { "cacheSizeMB", Math.Round(_currentCacheSize / (1024.0 * 1024.0), 2) },
+                { "maxCacheSizeMB", MAX_CACHE_SIZE_MB },
+                { "trackedFiles", _readCounts.Count },
+                { "cacheEnabled", _cacheEnabled }
+            };
+        }
+
+        private class CachedFile
+        {
+            public byte[] OriginalData { get; set; }
+            public byte[]? GzipData { get; set; }
+            public byte[]? BrotliData { get; set; }
+            public DateTime LastModified { get; set; }
+            public string ContentType { get; set; }
+            public long OriginalSize { get; set; }
         }
     }
 }
