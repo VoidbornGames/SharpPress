@@ -1,11 +1,7 @@
 ﻿using System.Collections.Concurrent;
-using System.IO;
 using System.Reflection;
 using System.Runtime.Loader;
-using System.Threading;
-using System.Threading.Tasks;
-using Microsoft.AspNetCore.Http;
-using Newtonsoft.Json;
+using Microsoft.Extensions.FileProviders;
 using SharpPress.Events;
 using SharpPress.Plugins;
 
@@ -17,6 +13,7 @@ namespace SharpPress.Services
         private readonly IEventBus _eventBus;
         private readonly IServiceProvider _serviceProvider;
         private readonly IServiceScopeFactory _scopeFactory;
+        private readonly DynamicFileProvider _fileProvider;
         private IEndpointRouteBuilder _routeBuilder;
 
         private readonly ConcurrentDictionary<string, IPlugin> _loadedPlugins = new();
@@ -25,17 +22,18 @@ namespace SharpPress.Services
         private readonly ConcurrentDictionary<string, string> _uniquePaths = new();
         private readonly ConcurrentDictionary<string, Func<HttpContext, Task>> _globalRoutes = new();
 
-
         public PluginManager(
             Logger logger,
             IEventBus eventBus,
             IServiceProvider serviceProvider,
-            IServiceScopeFactory scopeFactory)
+            IServiceScopeFactory scopeFactory,
+            DynamicFileProvider fileProvider)
         {
             _logger = logger;
             _eventBus = eventBus;
             _serviceProvider = serviceProvider;
             _scopeFactory = scopeFactory;
+            _fileProvider = fileProvider;
         }
 
         public async Task Initialize(IEndpointRouteBuilder routeBuilder)
@@ -68,18 +66,12 @@ namespace SharpPress.Services
             _logger.Log($"🔌 Plugin loading complete. {_loadedPlugins.Count} plugins loaded.");
         }
 
-        /// <summary>
-        /// Registers a route to the central routing table.
-        /// </summary>
         public void RegisterRoute(string path, Func<HttpContext, Task> handler)
         {
             _globalRoutes[path] = handler;
             _logger.Log($"🔌 Plugin registered route: {path}");
         }
 
-        /// <summary>
-        /// Gets a handler for a specific route.
-        /// </summary>
         public Func<HttpContext, Task>? GetRouteHandler(string path)
         {
             _globalRoutes.TryGetValue(path, out var handler);
@@ -105,6 +97,9 @@ namespace SharpPress.Services
                 var assembly = loadContext.LoadFromAssemblyPath(uniquePath);
                 _loadContexts[absolutePath] = loadContext;
 
+                var embeddedProvider = new ManifestEmbeddedFileProvider(assembly);
+                _fileProvider.AddProvider(embeddedProvider);
+
                 var pluginTypes = assembly.GetTypes()
                     .Where(t => typeof(IPlugin).IsAssignableFrom(t) && !t.IsInterface && !t.IsAbstract)
                     .ToList();
@@ -122,6 +117,7 @@ namespace SharpPress.Services
 
                     await plugin.OnLoadAsync(context);
                     _loadedPlugins[plugin.Name] = plugin;
+                    _logger.Log($"✅ Plugin Loaded: {plugin.Name} (Views Registered)");
                     await _eventBus.PublishAsync(new PluginLoadedEvent(plugin));
                 }
             }
@@ -176,6 +172,8 @@ namespace SharpPress.Services
                 try { kv.Value.Unload(); } catch { }
             }
             _loadContexts.Clear();
+            _fileProvider.Reset();
+
             for (int i = 0; i < 3; i++) { GC.Collect(); GC.WaitForPendingFinalizers(); await Task.Delay(100); }
             foreach (var temp in _uniquePaths.Values.ToList()) { try { if (File.Exists(temp)) File.Delete(temp); } catch { } }
             _uniquePaths.Clear();

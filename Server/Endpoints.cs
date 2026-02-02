@@ -33,9 +33,9 @@ namespace SharpPress
         };
 
         private static bool _cacheEnabled = true;
-        private const int CACHE_THRESHOLD_READS = 10;
-        private const int MAX_CACHE_SIZE_MB = 100;
-        private const long MAX_FILE_SIZE_FOR_CACHE = 5 * 1024 * 1024;
+        private const int CACHE_THRESHOLD_READS = 5;
+        private const int MAX_CACHE_SIZE_MB = 500;
+        private const long MAX_FILE_SIZE_FOR_CACHE = 10 * 1024 * 1024;
         private static long _currentCacheSize = 0;
         private static double _lastCpuUsage = 0;
 

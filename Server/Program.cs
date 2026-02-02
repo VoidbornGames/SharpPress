@@ -1,4 +1,6 @@
 ﻿using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.FileProviders;
+using Microsoft.Extensions.Hosting; // Needed for IWebHostEnvironment
 using Newtonsoft.Json;
 using SharpPress.Events;
 using SharpPress.Helpers;
@@ -27,6 +29,14 @@ namespace SharpPress
             });
             builder.Services.AddRazorPages();
 
+            builder.Services.AddSingleton<IFileProvider>(provider =>
+            {
+                var env = provider.GetRequiredService<IWebHostEnvironment>();
+                var defaultProvider = env.WebRootFileProvider;
+
+                return new DynamicFileProvider(defaultProvider);
+            });
+
             // Singletons 
             builder.Services.AddSingleton<Logger>();
             builder.Services.AddSingleton(provider => new ConfigManager(logger: provider.GetRequiredService<Logger>()));
@@ -42,7 +52,9 @@ namespace SharpPress
             builder.Services.AddSingleton<SftpServer>();
             builder.Services.AddSingleton<WebSocketServer>();
             builder.Services.AddSingleton<ValidationService>();
+            builder.Services.AddSingleton<DynamicFileProvider>(provider => (DynamicFileProvider)provider.GetRequiredService<IFileProvider>());
             builder.Services.AddSingleton<PluginManager>();
+
             builder.Services.AddSingleton<DownloadJobProcessor>();
             builder.Services.AddSingleton<AuthenticationService>();
             builder.Services.AddSingleton<PackageManager>();
