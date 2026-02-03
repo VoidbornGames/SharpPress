@@ -1,8 +1,4 @@
-﻿using Microsoft.Extensions.DependencyInjection;
-using Microsoft.Extensions.FileProviders;
-using Microsoft.Extensions.Hosting; // Needed for IWebHostEnvironment
-using Newtonsoft.Json;
-using SharpPress.Events;
+﻿using SharpPress.Events;
 using SharpPress.Helpers;
 using SharpPress.Models;
 using SharpPress.Servers;
@@ -29,15 +25,6 @@ namespace SharpPress
             });
             builder.Services.AddRazorPages();
 
-            builder.Services.AddSingleton<IFileProvider>(provider =>
-            {
-                var env = provider.GetRequiredService<IWebHostEnvironment>();
-                var defaultProvider = env.WebRootFileProvider;
-
-                return new DynamicFileProvider(defaultProvider);
-            });
-
-            // Singletons 
             builder.Services.AddSingleton<Logger>();
             builder.Services.AddSingleton(provider => new ConfigManager(logger: provider.GetRequiredService<Logger>()));
             builder.Services.AddSingleton(provider => new EmailService(config: provider.GetRequiredService<ConfigManager>().Config));
@@ -52,9 +39,7 @@ namespace SharpPress
             builder.Services.AddSingleton<SftpServer>();
             builder.Services.AddSingleton<WebSocketServer>();
             builder.Services.AddSingleton<ValidationService>();
-            builder.Services.AddSingleton<DynamicFileProvider>(provider => (DynamicFileProvider)provider.GetRequiredService<IFileProvider>());
             builder.Services.AddSingleton<PluginManager>();
-
             builder.Services.AddSingleton<DownloadJobProcessor>();
             builder.Services.AddSingleton<AuthenticationService>();
             builder.Services.AddSingleton<PackageManager>();
@@ -80,7 +65,7 @@ namespace SharpPress
                 Directory.Delete(Path.Combine("plugins", ".plugin_temp"), true);
 
             var pluginManager = serviceProvider.GetRequiredService<PluginManager>();
-            await pluginManager.Initialize(app);
+            pluginManager.Initialize(app);
             await pluginManager.LoadPluginsAsync();
 
             app.UseMiddleware<PluginMiddleware>(pluginManager);
@@ -108,7 +93,6 @@ namespace SharpPress
 
                 serviceProvider.GetRequiredService<SftpServer>().StopAsync().GetAwaiter().GetResult();
                 serviceProvider.GetRequiredService<DownloadJobProcessor>().StopAsync().GetAwaiter().GetResult();
-
                 pluginManager.UnloadAllPluginsAsync().GetAwaiter().GetResult();
 
                 logger.Log("✅ Shutdown complete.");

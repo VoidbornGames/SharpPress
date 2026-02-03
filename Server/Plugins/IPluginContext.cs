@@ -1,4 +1,5 @@
 ﻿using SharpPress.Services;
+using System.Reflection;
 
 namespace SharpPress.Plugins
 {
@@ -8,6 +9,7 @@ namespace SharpPress.Plugins
     public interface IPluginContext
     {
         Logger Logger { get; }
+        IServiceProvider ServiceProvider { get; }
 
         /// <summary>
         /// Factory to create scopes for Scoped services (used internally by GetService).

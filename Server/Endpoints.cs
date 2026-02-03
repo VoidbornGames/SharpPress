@@ -7,10 +7,10 @@ using SharpPress.Models;
 using SharpPress.Services;
 using System.Collections.Concurrent;
 using System.Diagnostics;
-using System.Net.NetworkInformation;
-using System.Text;
 using System.IO.Compression;
+using System.Net.NetworkInformation;
 using System.Security.Cryptography;
+using System.Text;
 
 namespace SharpPress
 {
@@ -436,6 +436,73 @@ namespace SharpPress
                 return Results.Ok(new { success = true, message = "Cache cleared successfully." });
             });
 
+            app.MapGet("/api/settings", async (
+                HttpRequest request,
+                [FromServices] AuthenticationService authService,
+                [FromServices] ConfigManager configManager) =>
+            {
+                if (!ValidateAdmin(request, authService)) return Results.Unauthorized();
+
+                var defaultSettings = new SiteSettings
+                {
+                    General = new GeneralSettings
+                    {
+                        SiteName = "SharpPress Site",
+                        SiteDescription = "Welcome to my site",
+                        AdminEmail = "admin@example.com",
+                        Timezone = "UTC",
+                        FooterText = "2023 © My Company"
+                    },
+                    Security = new SecuritySettings
+                    {
+                        ForceHttps = false,
+                        AllowRegistration = true,
+                        Require2FA = false,
+                        SessionTimeout = 60
+                    },
+                    Advanced = new AdvancedSettings
+                    {
+                        EnableCache = true,
+                        MaintenanceMode = false,
+                        CustomCss = ""
+                    }
+                };
+
+                if (configManager.Config.SiteSettings != null)
+                    defaultSettings = configManager.Config.SiteSettings;
+
+                return Results.Ok(defaultSettings);
+            });
+
+            app.MapPost("/api/settings", async (
+                HttpRequest request,
+                [FromBody] SiteSettings settings,
+                [FromServices] AuthenticationService authService,
+                [FromServices] ConfigManager configManager,
+                Logger logger) =>
+            {
+                if (!ValidateAdmin(request, authService)) return Results.Unauthorized();
+
+                if (settings == null) return Results.BadRequest(new { success = false, message = "Invalid settings data" });
+
+                try
+                {
+                    configManager.Config.SiteSettings = settings;
+                    if (configManager.Config.SiteSettings.Advanced != null)
+                        SetCacheEnabled(configManager.Config.SiteSettings.Advanced.EnableCache);
+
+                    await configManager.SaveConfig();
+
+                    logger.Log($"⚙️ Settings updated by admin.");
+                    return Results.Ok(new { success = true, message = "Settings saved successfully." });
+                }
+                catch (Exception ex)
+                {
+                    logger.LogError($"Error saving settings: {ex.Message}");
+                    return Results.Problem($"Error saving settings: {ex.Message}");
+                }
+            });
+
             app.MapFallback("{*path}", async (HttpContext context, ILogger<Program> logger) =>
             {
                 var rootPath = Path.Combine(AppContext.BaseDirectory, "public_html");
@@ -503,73 +570,6 @@ namespace SharpPress
                 logger.LogWarning($"[StaticHandler] 404 Not Found: {requestPath}");
                 await Serve404Page(context, rootPath);
             });
-
-            app.MapGet("/api/settings", async (
-                HttpRequest request,
-                [FromServices] AuthenticationService authService,
-                [FromServices] ConfigManager configManager) =>
-            {
-                if (!ValidateAdmin(request, authService)) return Results.Unauthorized();
-
-                var defaultSettings = new SiteSettings
-                {
-                    General = new GeneralSettings
-                    {
-                        SiteName = "SharpPress Site",
-                        SiteDescription = "Welcome to my site",
-                        AdminEmail = "admin@example.com",
-                        Timezone = "UTC",
-                        FooterText = "2023 © My Company"
-                    },
-                    Security = new SecuritySettings
-                    {
-                        ForceHttps = false,
-                        AllowRegistration = true,
-                        Require2FA = false,
-                        SessionTimeout = 60
-                    },
-                    Advanced = new AdvancedSettings
-                    {
-                        EnableCache = true,
-                        MaintenanceMode = false,
-                        CustomCss = ""
-                    }
-                };
-
-                if (configManager.Config.SiteSettings != null)
-                    defaultSettings = configManager.Config.SiteSettings;
-
-                return Results.Ok(defaultSettings);
-            });
-
-            app.MapPost("/api/settings", async (
-                HttpRequest request,
-                [FromBody] SiteSettings settings,
-                [FromServices] AuthenticationService authService,
-                [FromServices] ConfigManager configManager,
-                Logger logger) =>
-            {
-                if (!ValidateAdmin(request, authService)) return Results.Unauthorized();
-
-                if (settings == null) return Results.BadRequest(new { success = false, message = "Invalid settings data" });
-
-                try
-                {
-                    configManager.Config.SiteSettings = settings;
-                    if (configManager.Config.SiteSettings.Advanced != null)
-                        SetCacheEnabled(configManager.Config.SiteSettings.Advanced.EnableCache);
-
-                    await configManager.SaveConfig();
-
-                    logger.Log($"⚙️ Settings updated by admin.");
-                    return Results.Ok(new { success = true, message = "Settings saved successfully." });
-                }
-                catch (Exception ex)
-                {
-                    logger.LogError($"Error saving settings: {ex.Message}");
-                    return Results.Problem($"Error saving settings: {ex.Message}");
-                }
-            });
         }
 
         private static bool IsSuspiciousPath(string path)
@@ -579,16 +579,16 @@ namespace SharpPress
 
             var suspicious = new[]
             {
-                "..",          
-                "~",           
-                "/etc/",    
-                "/proc/",    
-                "/sys/",   
-                "\\\\",         
-                ".env",         
+                "..",
+                "~",
+                "/etc/",
+                "/proc/",
+                "/sys/",
+                "\\\\",
+                ".env",
                 ".git",
-                "web.config",   
-                "appsettings",  
+                "web.config",
+                "appsettings",
             };
 
             var lowerPath = path.ToLowerInvariant();
@@ -733,7 +733,7 @@ namespace SharpPress
             {
                 if (lastModified <= modifiedSince.ToUniversalTime())
                 {
-                    context.Response.StatusCode = 304; 
+                    context.Response.StatusCode = 304;
                     return true;
                 }
             }

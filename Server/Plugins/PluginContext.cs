@@ -1,9 +1,8 @@
 ﻿using Microsoft.AspNetCore.Http;
-using Microsoft.AspNetCore.Routing;
-using Microsoft.Extensions.DependencyInjection;
+using Microsoft.AspNetCore.Mvc.ApplicationParts;
+using Microsoft.AspNetCore.Mvc.Infrastructure;
 using SharpPress.Plugins;
-using System;
-using System.Threading.Tasks;
+using System.Reflection;
 
 namespace SharpPress.Services
 {
@@ -11,17 +10,20 @@ namespace SharpPress.Services
     {
         public Logger Logger { get; }
         public IServiceScopeFactory ScopeFactory { get; }
+        public IServiceProvider ServiceProvider { get; }
 
         private readonly IEndpointRouteBuilder _routes;
 
         public PluginContext(
             Logger logger,
             IServiceScopeFactory scopeFactory,
-            IEndpointRouteBuilder routes)
+            IEndpointRouteBuilder routes,
+            IServiceProvider serviceProvider)
         {
             Logger = logger;
             ScopeFactory = scopeFactory;
             _routes = routes;
+            ServiceProvider = serviceProvider;
         }
 
         public void MapGet(string pattern, Delegate handler) => MapRoute(pattern, handler);
