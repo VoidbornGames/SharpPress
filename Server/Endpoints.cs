@@ -1,14 +1,16 @@
-﻿using Microsoft.AspNetCore.Http;
-using Microsoft.AspNetCore.Mvc;
+﻿using Microsoft.AspNetCore.Mvc;
 using Microsoft.AspNetCore.StaticFiles;
 using Newtonsoft.Json;
 using SharpPress.Helpers;
 using SharpPress.Models;
 using SharpPress.Services;
+using System;
 using System.Collections.Concurrent;
 using System.Diagnostics;
 using System.IO.Compression;
+using System.Net;
 using System.Net.NetworkInformation;
+using System.Net.Sockets;
 using System.Security.Cryptography;
 using System.Text;
 
@@ -16,9 +18,16 @@ namespace SharpPress
 {
     public static class Endpoints
     {
+        public static bool disableDefaultLoginRoute = false;
+        public static bool disableDefaultRegisterRoute = false;
+
+
         private static readonly ConcurrentDictionary<string, CachedFile> _fileCache = new();
         private static readonly ConcurrentDictionary<string, int> _readCounts = new();
+        private static readonly ConcurrentDictionary<string, SemaphoreSlim> _fileLocks = new();
         private static readonly FileExtensionContentTypeProvider _contentTypeProvider = new();
+        private static readonly object _cacheLock = new object();
+
         private static readonly HashSet<string> _compressibleTypes = new(StringComparer.OrdinalIgnoreCase)
         {
             "text/html", "text/css", "text/javascript", "application/javascript",
@@ -28,80 +37,137 @@ namespace SharpPress
 
         private static readonly HashSet<string> _cacheableExtensions = new(StringComparer.OrdinalIgnoreCase)
         {
-            ".html", ".css", ".js", ".json", ".svg", ".xml", ".txt",
+            ".html",".htm",".php",".phtm", ".css", ".js", ".json", ".svg", ".xml", ".txt",
             ".jpg", ".jpeg", ".png", ".gif", ".webp", ".ico", ".woff", ".woff2", ".ttf", ".eot"
+        };
+
+        private static readonly IPAddress[] TrustedProxies =
+        {
+            IPAddress.Loopback,
+            IPAddress.IPv6Loopback
         };
 
         private static bool _cacheEnabled = true;
         private const int CACHE_THRESHOLD_READS = 5;
-        private const int MAX_CACHE_SIZE_MB = 500;
-        private const long MAX_FILE_SIZE_FOR_CACHE = 10 * 1024 * 1024;
+        private const int MAX_CACHE_SIZE_MB = 1024;
+        private const long MAX_FILE_SIZE_FOR_CACHE = 12 * 1024 * 1024;
+        private const long MAX_REQUEST_BODY_SIZE = 50 * 1024 * 1024;
         private static long _currentCacheSize = 0;
         private static double _lastCpuUsage = 0;
+        private static string _phpExecutablePath = "php";
+        private static bool allowRegisters = true;
+        private static bool _isShuttingDown = false;
+
 
         static Endpoints()
         {
-            _ = Task.Run(async () =>
+            var phpPath = Environment.GetEnvironmentVariable("PHP_EXECUTABLE_PATH");
+            if (!string.IsNullOrEmpty(phpPath) && File.Exists(phpPath))
             {
-                var proc = Process.GetCurrentProcess();
-                TimeSpan prevCpu = proc.TotalProcessorTime;
-                DateTime prevTime = DateTime.UtcNow;
-
-                while (true)
-                {
-                    await Task.Delay(1000);
-                    TimeSpan currCpu = proc.TotalProcessorTime;
-                    DateTime currTime = DateTime.UtcNow;
-
-                    double cpuUsedMs = (currCpu - prevCpu).TotalMilliseconds;
-                    double elapsedMs = (currTime - prevTime).TotalMilliseconds;
-                    int cores = Environment.ProcessorCount;
-
-                    _lastCpuUsage = Math.Round(cpuUsedMs / (elapsedMs * cores) * 100, 2);
-
-                    prevCpu = currCpu;
-                    prevTime = currTime;
-                }
-            });
-
-            _ = Task.Run(async () =>
-            {
-                while (true)
-                {
-                    await Task.Delay(TimeSpan.FromSeconds(60));
-                    _readCounts.Clear();
-                }
-            });
-
-            _ = Task.Run(async () =>
-            {
-                while (true)
-                {
-                    await Task.Delay(TimeSpan.FromMinutes(30));
-                    _fileCache.Clear();
-                    _currentCacheSize = 0;
-                }
-            });
-        }
-
-        public static void SetCacheEnabled(bool enabled)
-        {
-            _cacheEnabled = enabled;
-            if (!enabled)
-            {
-                ClearCache();
+                _phpExecutablePath = phpPath;
             }
-        }
+            else
+            {
+                var commonPaths = new[]
+                {
+                    "/usr/local/bin/php",
+                    "/usr/bin/php",
+                    "/bin/php",
+                    "C:\\php\\php.exe",
+                    "C:\\xampp\\php\\php.exe",
+                    "C:\\wamp64\\bin\\php\\php8.2.0\\php.exe",
+                    "C:\\wamp\\bin\\php\\php5.6.40\\php.exe"
+                };
 
-        public static void ClearCache()
-        {
-            _fileCache.Clear();
-            _readCounts.Clear();
-            _currentCacheSize = 0;
+                foreach (var path in commonPaths)
+                {
+                    if (File.Exists(path))
+                    {
+                        _phpExecutablePath = path;
+                        break;
+                    }
+                }
+            }
+
+            _ = Task.Run(async () =>
+            {
+                try
+                {
+                    var proc = Process.GetCurrentProcess();
+                    TimeSpan prevCpu = proc.TotalProcessorTime;
+                    DateTime prevTime = DateTime.UtcNow;
+
+                    while (!_isShuttingDown)
+                    {
+                        await Task.Delay(1000);
+
+                        if (_isShuttingDown) break;
+
+                        TimeSpan currCpu = proc.TotalProcessorTime;
+                        DateTime currTime = DateTime.UtcNow;
+
+                        double cpuUsedMs = (currCpu - prevCpu).TotalMilliseconds;
+                        double elapsedMs = (currTime - prevTime).TotalMilliseconds;
+                        int cores = Environment.ProcessorCount;
+
+                        if (elapsedMs > 0 && cores > 0)
+                        {
+                            _lastCpuUsage = Math.Round(cpuUsedMs / (elapsedMs * cores) * 100, 2);
+                        }
+
+                        prevCpu = currCpu;
+                        prevTime = currTime;
+                    }
+                }
+                catch (Exception ex)
+                {
+                    Console.WriteLine($"[Critical Error] CPU Monitor crashed: {ex.Message}");
+                }
+            });
+
+            _ = Task.Run(async () =>
+            {
+                try
+                {
+                    while (!_isShuttingDown)
+                    {
+                        await Task.Delay(TimeSpan.FromSeconds(60));
+                        if (_isShuttingDown) break;
+                        _readCounts.Clear();
+                    }
+                }
+                catch (Exception ex)
+                {
+                    Console.WriteLine($"[Critical Error] ReadCounts Cleaner crashed: {ex.Message}");
+                }
+            });
+
+            _ = Task.Run(async () =>
+            {
+                try
+                {
+                    while (!_isShuttingDown)
+                    {
+                        await Task.Delay(TimeSpan.FromMinutes(30));
+                        if (_isShuttingDown) break;
+                        ClearCache();
+                    }
+                }
+                catch (Exception ex)
+                {
+                    Console.WriteLine($"[Critical Error] Cache Cleaner crashed: {ex.Message}");
+                }
+            });
         }
 
         public static void Map(WebApplication app, PluginManager pluginManager)
         {
+            app.Use(async (context, next) =>
+            {
+                AddSecurityHeaders(context);
+                await next();
+            });
+
             bool ValidateAdmin(HttpRequest request, AuthenticationService authService)
             {
                 string authHeader = request.Headers["Authorization"].ToString();
@@ -110,58 +176,70 @@ namespace SharpPress
                 return authService.ValidateJwtToken(token) && authService.GetRoleFromToken(token).ToLower() == "admin";
             }
 
-            app.MapPost("/api/login", async (
-                [FromBody] LoginRequest loginRequest,
-                UserService userService,
-                AuthenticationService authService,
-                Logger logger) =>
+            //app.MapGet("/health", () => Results.Ok(new { status = "Healthy", timestamp = DateTime.UtcNow }));
+
+            if (disableDefaultLoginRoute == false)
             {
-                if (loginRequest == null) return Results.BadRequest(new { success = false, message = "Invalid request" });
-
-                var (user, message) = await userService.AuthenticateUserAsync(loginRequest);
-                if (user != null)
+                app.MapPost("/api/login", async (
+                    HttpContext context,
+                    [FromBody] LoginRequest loginRequest,
+                    UserService userService,
+                    AuthenticationService authService,
+                    Logger logger) =>
                 {
-                    var token = authService.GenerateJwtToken(user);
-                    logger.Log($"✅ User logged in: {user.Username}");
-                    return Results.Ok(new
-                    {
-                        success = true,
-                        token,
-                        refreshToken = user.RefreshToken,
-                        user = new { username = user.Username, role = user.Role, email = user.Email }
-                    });
-                }
-                return Results.Unauthorized();
-            });
+                    if (loginRequest == null) return Results.BadRequest(new { success = false, message = "Invalid request" });
 
-            app.MapPost("/api/register", async (
-                [FromBody] RegisterRequest registerRequest,
-                UserService userService,
-                AuthenticationService authService,
-                Logger logger) =>
+                    var (user, message) = await userService.AuthenticateUserAsync(loginRequest);
+                    if (user != null)
+                    {
+                        var token = authService.GenerateJwtToken(user);
+                        logger.Log($"✅ User logged in: {user.Username} | IP: {ResolveClientIp(context.Request)}");
+                        return Results.Ok(new
+                        {
+                            success = true,
+                            token,
+                            refreshToken = user.RefreshToken,
+                            user = new { username = user.Username, role = user.Roles, email = user.Email }
+                        });
+                    }
+                    return Results.Unauthorized();
+                });
+            }
+
+            if (disableDefaultRegisterRoute == false)
             {
-                if (registerRequest == null) return Results.BadRequest(new { success = false, message = "Invalid request" });
-
-                var (user, message) = await userService.CreateUserAsync(registerRequest);
-                if (user != null && user.Role.ToLower() == "admin")
+                app.MapPost("/api/register", async (
+                    HttpContext context,
+                    [FromBody] RegisterRequest registerRequest,
+                    UserService userService,
+                    AuthenticationService authService,
+                    Logger logger) =>
                 {
-                    var token = authService.GenerateJwtToken(user);
-                    logger.Log($"✅ User registered: {user.Username}");
-                    return Results.Ok(new
+                    if (registerRequest == null) return Results.BadRequest(new { success = false, message = "Invalid request" });
+                    if (!allowRegisters) return Results.BadRequest(new { success = false, message = "Registration is disabled" });
+
+                    var (user, message) = await userService.CreateUserAsync(registerRequest);
+                    if (user != null)
                     {
-                        success = true,
-                        token,
-                        refreshToken = user.RefreshToken,
-                        user = new { username = user.Username, role = user.Role, email = user.Email }
-                    });
-                }
-                return Results.BadRequest(new { success = false, message });
-            });
+                        var token = authService.GenerateJwtToken(user);
+                        logger.Log($"✅ User registered: {user.Username} | IP: {ResolveClientIp(context.Request)}");
+                        return Results.Ok(new
+                        {
+                            success = true,
+                            token,
+                            refreshToken = user.RefreshToken,
+                            user = new { username = user.Username, role = user.Roles, email = user.Email }
+                        });
+                    }
+                    return Results.BadRequest(new { success = false, message });
+                });
+            }
 
             app.MapGet("/api/plugins", (
                 HttpRequest request,
                 [FromServices] AuthenticationService authService) =>
             {
+        
                 if (!ValidateAdmin(request, authService)) return Results.Unauthorized();
 
                 var plugins = pluginManager.GetLoadedPlugins();
@@ -194,9 +272,14 @@ namespace SharpPress
                 string pluginsDirectory = Path.Combine(AppContext.BaseDirectory, "plugins");
                 Directory.CreateDirectory(pluginsDirectory);
 
-                string fileName = file.FileName;
-                string tempFilePath = Path.Combine(pluginsDirectory, $"{fileName}.tmp");
-                string finalFilePath = Path.Combine(pluginsDirectory, fileName);
+                string safeFileName = Path.GetFileName(file.FileName);
+                if (string.IsNullOrEmpty(safeFileName)) return Results.BadRequest(new { success = false, message = "Invalid file name" });
+
+                if (safeFileName.StartsWith(".") || safeFileName.Contains(".."))
+                    return Results.BadRequest(new { success = false, message = "Invalid file name" });
+
+                string tempFilePath = Path.Combine(pluginsDirectory, $"{safeFileName}.tmp");
+                string finalFilePath = Path.Combine(pluginsDirectory, safeFileName);
 
                 try
                 {
@@ -206,22 +289,36 @@ namespace SharpPress
                         await file.CopyToAsync(stream);
                     }
 
-                    if (Path.GetExtension(fileName) == ".dll")
+                    if (Path.GetExtension(safeFileName) == ".dll")
                     {
                         await pluginManager.UnloadAllPluginsAsync();
+
+                        if (File.Exists(finalFilePath))
+                        {
+                            try { File.Delete(finalFilePath); }
+                            catch (IOException ioEx)
+                            {
+                                logger.LogError($"Could not delete old plugin (locked?): {ioEx.Message}. Overwriting may fail or require restart.");
+                            }
+                        }
+
                         if (File.Exists(finalFilePath)) File.Delete(finalFilePath);
                         File.Move(tempFilePath, finalFilePath);
-                        logger.Log($"✅ Replaced old plugin with '{finalFilePath}'");
                         tempFilePath = null;
+
                         await pluginManager.LoadPluginsAsync();
                     }
-                    else if (Path.GetExtension(fileName) == ".pkg")
+                    else if (Path.GetExtension(safeFileName) == ".pkg")
                     {
                         var package = await packageManager.GetPackageFromByteArray(await File.ReadAllBytesAsync(tempFilePath));
                         if (package != null)
                             await packageManager.InstallPackage(package);
                         else
                             return Results.BadRequest(new { success = false, message = "Invalid package" });
+                    }
+                    else
+                    {
+                        return Results.BadRequest(new { success = false, message = "Unsupported file type." });
                     }
 
                     logger.Log("✅ Plugin upload and reload complete.");
@@ -252,42 +349,6 @@ namespace SharpPress
                 return Results.Ok(new { success = true, message = "Plugins reloaded successfully." });
             });
 
-            app.MapGet("/api/market/plugins", async (
-                HttpRequest request,
-                [FromServices] AuthenticationService authService) =>
-            {
-                if (!ValidateAdmin(request, authService)) return Results.Unauthorized();
-
-                try
-                {
-                    using var client = new HttpClient();
-                    var marketResponse = await client.GetAsync("https://dashboard.voidgames.ir/api/market/plugins");
-                    marketResponse.EnsureSuccessStatusCode();
-
-                    var content = await marketResponse.Content.ReadAsStringAsync();
-                    var marketPlugins = JsonConvert.DeserializeObject<List<MarketPlugin>>(content);
-
-                    if (marketPlugins != null)
-                    {
-                        foreach (var plugin in Directory.GetFiles(Path.Combine(AppContext.BaseDirectory, "plugins")))
-                        {
-                            var fileName = Path.GetFileNameWithoutExtension(plugin);
-                            var existed = marketPlugins.FirstOrDefault(p => p.Name == fileName, new MarketPlugin() { Name = string.Empty });
-                            if (string.IsNullOrEmpty(existed.Name))
-                                continue;
-
-                            marketPlugins.Remove(existed);
-                        }
-                    }
-
-                    return Results.Ok(new { success = true, plugins = marketPlugins });
-                }
-                catch (Exception ex)
-                {
-                    return Results.Problem("Failed to fetch market plugins.");
-                }
-            });
-
             app.MapPost("/api/marketplace/download", async (
                 HttpRequest request,
                 [FromBody] MarketPlugin downloadRequest,
@@ -300,23 +361,35 @@ namespace SharpPress
                     return Results.BadRequest(new { success = false, message = "Request body must contain a valid 'DownloadLink' and 'Name' property." });
                 }
 
+                if (!IsSafeUrl(downloadRequest.DownloadLink))
+                {
+                    return Results.BadRequest(new { success = false, message = "Invalid or forbidden download URL." });
+                }
+
                 var downloadJobProcessor = request.HttpContext.RequestServices.GetRequiredService<DownloadJobProcessor>();
                 downloadJobProcessor.EnqueueJob(downloadRequest);
 
                 return Results.Accepted(null, new { success = true, message = $"Download request for '{downloadRequest.Name}.dll' has been queued and will be processed." });
             });
 
-            app.MapGet("/videos/{filename}", (string filename, [FromServices] VideoService videoService) =>
+            app.MapGet("/videos/{filename}", async (HttpRequest request, string filename, [FromServices] VideoStreamingService videoService, [FromServices] AuthenticationService authService) =>
             {
+                if (!ValidateAdmin(request, authService)) return Results.Unauthorized();
+
+                filename = Path.GetFileName(filename);
+                if (string.IsNullOrEmpty(filename)) return Results.BadRequest("Invalid filename.");
+
                 string filePath = videoService.GetVideoFilePath(filename);
+
                 if (filePath == null || !File.Exists(filePath)) return Results.NotFound("Video file not found");
 
                 string contentType = videoService.GetContentType(filePath);
                 return Results.File(filePath, contentType, enableRangeProcessing: true);
             });
 
-            app.MapGet("/api/stats", async (HttpRequest request, HttpResponse response, UserService userService) =>
+            app.MapGet("/api/stats", async (HttpRequest request, HttpResponse response, UserService userService, [FromServices] AuthenticationService authService) =>
             {
+                if (!ValidateAdmin(request, authService)) return Results.Unauthorized();
                 try
                 {
                     var proc = Process.GetCurrentProcess();
@@ -400,15 +473,14 @@ namespace SharpPress
                         netSentMB = totalBytesSent / (1024.0 * 1024),
                         netReceivedMB = totalBytesReceived / (1024.0 * 1024),
                         activePlugins = pluginsCount,
-                        uptime = (DateTime.Now - Process.GetCurrentProcess().StartTime).ToString(@"hh\:mm\:ss"),
-                        users = userService.Users.Count
+                        uptime = (DateTime.Now - Process.GetCurrentProcess().StartTime).ToString(@"hh\:mm\:ss")
                     };
 
                     return Results.Ok(stats);
                 }
                 catch (Exception ex)
                 {
-                    return Results.Problem(ex.Message);
+                    return Results.Problem("An error occurred while fetching stats.");
                 }
             });
 
@@ -416,8 +488,7 @@ namespace SharpPress
                 HttpRequest request,
                 [FromServices] AuthenticationService authService) =>
             {
-                if (!ValidateAdmin(request, authService))
-                    return Results.Unauthorized();
+                if (!ValidateAdmin(request, authService)) return Results.Unauthorized();
 
                 var stats = GetCacheStats();
                 return Results.Ok(stats);
@@ -428,8 +499,7 @@ namespace SharpPress
                 [FromServices] AuthenticationService authService,
                 Logger logger) =>
             {
-                if (!ValidateAdmin(request, authService))
-                    return Results.Unauthorized();
+                if (!ValidateAdmin(request, authService)) return Results.Unauthorized();
 
                 ClearCache();
                 logger.Log("🗑️ Cache cleared by admin.");
@@ -499,11 +569,11 @@ namespace SharpPress
                 catch (Exception ex)
                 {
                     logger.LogError($"Error saving settings: {ex.Message}");
-                    return Results.Problem($"Error saving settings: {ex.Message}");
+                    return Results.Problem("An error occurred while saving settings.");
                 }
             });
 
-            app.MapFallback("{*path}", async (HttpContext context, ILogger<Program> logger) =>
+            app.MapFallback("{*path}", async (HttpContext context, Logger logger) =>
             {
                 var rootPath = Path.Combine(AppContext.BaseDirectory, "public_html");
                 if (!Directory.Exists(rootPath))
@@ -514,54 +584,69 @@ namespace SharpPress
                 var requestPath = context.Request.Path.Value?.TrimStart('/');
                 if (string.IsNullOrEmpty(requestPath))
                 {
-                    requestPath = "index.html";
+                    requestPath = "index.php";
+                    var phpIndexPath = Path.Combine(rootPath, "index.php");
+                    if (!File.Exists(phpIndexPath))
+                    {
+                        requestPath = "index.html";
+                    }
                 }
 
                 requestPath = requestPath.TrimEnd('/');
-                if (IsSuspiciousPath(requestPath))
-                {
-                    logger.LogWarning($"[StaticHandler] Suspicious path rejected: {requestPath}");
-                    context.Response.StatusCode = 403;
-                    await context.Response.WriteAsync("Forbidden");
-                    return;
-                }
 
                 var filePath = Path.Combine(rootPath, requestPath);
 
                 if (await ServeFile(context, filePath, requestPath))
                 {
-                    LogFileAccess(logger, requestPath, context.Response.StatusCode);
                     return;
                 }
 
                 if (!Path.HasExtension(requestPath))
                 {
+                    var phpPath = filePath + ".php";
+                    if (await ServeFile(context, phpPath, requestPath + ".php"))
+                    {
+                        return;
+                    }
+
                     var htmlPath = filePath + ".html";
                     if (await ServeFile(context, htmlPath, requestPath + ".html"))
                     {
-                        LogFileAccess(logger, requestPath + ".html", context.Response.StatusCode);
                         return;
                     }
                 }
 
                 if (!Path.HasExtension(requestPath))
                 {
+                    var indexPhpPath = Path.Combine(filePath, "index.php");
+                    if (await ServeFile(context, indexPhpPath, requestPath + "/index.php"))
+                    {
+                        return;
+                    }
+
                     var indexPath = Path.Combine(filePath, "index.html");
                     if (await ServeFile(context, indexPath, requestPath + "/index.html"))
                     {
-                        LogFileAccess(logger, requestPath + "/index.html", context.Response.StatusCode);
                         return;
                     }
                 }
 
                 if (!Path.HasExtension(requestPath) && !requestPath.StartsWith("api/"))
                 {
-                    var spaIndexPath = Path.Combine(rootPath, "index.html");
+                    var spaIndexPath = Path.Combine(rootPath, "index.php");
+                    if (File.Exists(spaIndexPath))
+                    {
+                        if (await ServeFile(context, spaIndexPath, "index.php"))
+                        {
+                            return;
+                        }
+                    }
+
+                    spaIndexPath = Path.Combine(rootPath, "index.html");
                     if (File.Exists(spaIndexPath))
                     {
                         if (await ServeFile(context, spaIndexPath, "index.html"))
                         {
-                            logger.LogInformation($"[StaticHandler] SPA fallback: {requestPath} -> index.html");
                             return;
                         }
                     }
@@ -572,39 +657,42 @@ namespace SharpPress
             });
         }
 
-        private static bool IsSuspiciousPath(string path)
+        private static bool IsSafeUrl(string url)
         {
-            if (string.IsNullOrEmpty(path))
+            if (!Uri.TryCreate(url, UriKind.Absolute, out var uri))
                 return false;
 
-            var suspicious = new[]
-            {
-                "..",
-                "~",
-                "/etc/",
-                "/proc/",
-                "/sys/",
-                "\\\\",
-                ".env",
-                ".git",
-                "web.config",
-                "appsettings",
-            };
+            if (uri.Scheme != "http" && uri.Scheme != "https")
+                return false;
 
-            var lowerPath = path.ToLowerInvariant();
-            return suspicious.Any(s => lowerPath.Contains(s));
-        }
+            var host = uri.Host;
 
-        private static void LogFileAccess(ILogger logger, string path, int statusCode)
-        {
-            if (statusCode == 304)
+            if (string.Equals(host, "localhost", StringComparison.OrdinalIgnoreCase) || host == "127.0.0.1" || host == "::1")
+                return false;
+
+            try
             {
-                logger.LogDebug($"[StaticHandler] 304 Not Modified: {path}");
+                var ipAddresses = Dns.GetHostAddresses(host);
+                foreach (var ip in ipAddresses)
+                {
+                    if (IPAddress.IsLoopback(ip)) return false;
+                    if (ip.IsIPv6LinkLocal) return false;
+
+                    if (ip.AddressFamily == AddressFamily.InterNetwork)
+                    {
+                        var bytes = ip.GetAddressBytes();
+                        if (bytes[0] == 10) return false;
+                        if (bytes[0] == 172 && bytes[1] >= 16 && bytes[1] <= 31) return false;
+                        if (bytes[0] == 192 && bytes[1] == 168) return false;
+                    }
+                }
             }
-            else if (statusCode == 200)
+            catch
             {
-                logger.LogDebug($"[StaticHandler] 200 OK: {path}");
+                return false;
             }
+
+            return true;
         }
 
         private static async Task Serve404Page(HttpContext context, string rootPath)
@@ -617,6 +705,13 @@ namespace SharpPress
             {
                 var content = await File.ReadAllTextAsync(custom404Path);
                 await context.Response.WriteAsync(content);
+                return;
+            }
+
+            var custom404PhpPath = Path.Combine(rootPath, "404.php");
+            if (File.Exists(custom404PhpPath))
+            {
+                await ExecutePhpFile(context, custom404PhpPath);
                 return;
             }
 
@@ -699,7 +794,27 @@ namespace SharpPress
             if (!File.Exists(filePath))
                 return false;
 
-            var fullPath = Path.GetFullPath(filePath);
+            var fileInfo = new FileInfo(filePath);
+            string resolvedPath = filePath;
+
+            try
+            {
+                if (fileInfo.Exists)
+                {
+                    var linkTarget = fileInfo.ResolveLinkTarget(true);
+                    if (linkTarget != null)
+                    {
+                        resolvedPath = linkTarget.FullName;
+                    }
+                }
+            }
+            catch
+            {
+                context.Response.StatusCode = 403;
+                return true;
+            }
+
+            var fullPath = Path.GetFullPath(resolvedPath);
             var rootPath = Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "public_html"));
 
             if (!fullPath.StartsWith(rootPath, StringComparison.OrdinalIgnoreCase))
@@ -708,7 +823,12 @@ namespace SharpPress
                 return true;
             }
 
-            var fileInfo = new FileInfo(filePath);
+            var extension = Path.GetExtension(filePath).ToLowerInvariant();
+            if (extension == ".php")
+            {
+                return await ExecutePhpFile(context, filePath);
+            }
+
             var lastModified = fileInfo.LastWriteTimeUtc;
             var fileSize = fileInfo.Length;
 
@@ -764,6 +884,224 @@ namespace SharpPress
                 contentType, readCount, supportsBrotli, supportsGzip);
         }
 
+        private static async Task<bool> ExecutePhpFile(HttpContext context, string filePath)
+        {
+            try
+            {
+                var request = context.Request;
+                var response = context.Response;
+
+                if (request.ContentLength > MAX_REQUEST_BODY_SIZE)
+                {
+                    response.StatusCode = 413;
+                    response.ContentType = "text/html; charset=utf-8";
+                    await response.WriteAsync("<html><body><h1>Payload Too Large</h1></body></html>");
+                    return true;
+                }
+
+                var envVars = new Dictionary<string, string>
+                {
+                    { "REQUEST_METHOD", request.Method },
+                    { "REQUEST_URI", request.Path.Value ?? "/" },
+                    { "SCRIPT_NAME", request.Path.Value ?? "/" },
+                    { "SCRIPT_FILENAME", filePath },
+                    { "DOCUMENT_ROOT", Path.Combine(AppContext.BaseDirectory, "public_html") },
+                    { "SERVER_PROTOCOL", "HTTP/1.1" },
+                    { "SERVER_SOFTWARE", "SharpPress" },
+                    { "SERVER_NAME", request.Host.Host },
+                    { "SERVER_PORT", request.Host.Port?.ToString() ?? "80" },
+                    { "QUERY_STRING", request.QueryString.Value?.TrimStart('?') ?? "" },
+                    { "REMOTE_ADDR", context.Connection.RemoteIpAddress?.ToString() ?? "127.0.0.1" },
+                    { "CONTENT_TYPE", request.ContentType ?? "" },
+                    { "CONTENT_LENGTH", request.ContentLength?.ToString() ?? "0" },
+                    { "HTTPS", request.IsHttps ? "on" : "off" },
+                    { "HTTP_HOST", request.Host.Value },
+                    { "HTTP_USER_AGENT", request.Headers["User-Agent"].ToString() },
+                    { "HTTP_ACCEPT", request.Headers["Accept"].ToString() },
+                    { "HTTP_ACCEPT_LANGUAGE", request.Headers["Accept-Language"].ToString() },
+                    { "HTTP_ACCEPT_ENCODING", request.Headers["Accept-Encoding"].ToString() },
+                    { "HTTP_COOKIE", request.Headers["Cookie"].ToString() },
+                    { "HTTP_REFERER", request.Headers["Referer"].ToString() },
+                    { "HTTP_X_REQUESTED_WITH", request.Headers["X-Requested-With"].ToString() },
+                    { "HTTP_AUTHORIZATION", request.Headers["Authorization"].ToString() }
+                };
+
+                foreach (var header in request.Headers)
+                {
+                    var key = $"HTTP_{header.Key.ToUpperInvariant().Replace("-", "_")}";
+                    if (!envVars.ContainsKey(key))
+                    {
+                        envVars[key] = header.Value.ToString();
+                    }
+                }
+
+                string requestBody = null;
+                if (request.Method.Equals("POST", StringComparison.OrdinalIgnoreCase) ||
+                    request.Method.Equals("PUT", StringComparison.OrdinalIgnoreCase) ||
+                    request.Method.Equals("PATCH", StringComparison.OrdinalIgnoreCase))
+                {
+                    request.EnableBuffering();
+                    using (var reader = new StreamReader(request.Body, Encoding.UTF8, true, 1024, true))
+                    {
+                        requestBody = await reader.ReadToEndAsync();
+                    }
+                    request.Body.Position = 0;
+                }
+
+                var startInfo = new ProcessStartInfo
+                {
+                    FileName = _phpExecutablePath,
+                    Arguments = $"\"{filePath}\"",
+                    RedirectStandardOutput = true,
+                    RedirectStandardError = true,
+                    RedirectStandardInput = true,
+                    UseShellExecute = false,
+                    CreateNoWindow = true,
+                    WorkingDirectory = Path.GetDirectoryName(filePath)
+                };
+
+                foreach (var env in envVars)
+                {
+                    startInfo.Environment[env.Key] = env.Value;
+                }
+
+                using var process = new Process { StartInfo = startInfo };
+                var outputBuilder = new StringBuilder();
+                var errorBuilder = new StringBuilder();
+
+                process.OutputDataReceived += (sender, e) =>
+                {
+                    if (e.Data != null)
+                        outputBuilder.AppendLine(e.Data);
+                };
+
+                process.ErrorDataReceived += (sender, e) =>
+                {
+                    if (e.Data != null)
+                        errorBuilder.AppendLine(e.Data);
+                };
+
+                process.Start();
+
+                process.BeginOutputReadLine();
+                process.BeginErrorReadLine();
+
+                if (!string.IsNullOrEmpty(requestBody))
+                {
+                    await process.StandardInput.WriteAsync(requestBody);
+                    process.StandardInput.Close();
+                }
+
+                var timeoutTask = Task.Delay(TimeSpan.FromSeconds(30));
+                var processTask = process.WaitForExitAsync();
+
+                if (await Task.WhenAny(processTask, timeoutTask) == timeoutTask)
+                {
+                    try { process.Kill(); } catch { }
+                    response.StatusCode = 504;
+                    response.ContentType = "text/html; charset=utf-8";
+                    await response.WriteAsync("<html><body><h1>Gateway Timeout</h1><p>Script execution timed out.</p></body></html>");
+                    return true;
+                }
+
+                var output = outputBuilder.ToString();
+                var error = errorBuilder.ToString();
+
+                if (process.ExitCode != 0 && !string.IsNullOrEmpty(error))
+                {
+                    response.StatusCode = 500;
+                    response.ContentType = "text/html; charset=utf-8";
+                    await response.WriteAsync($"<html><body><h1>Internal Server Error</h1><p>Script error.</p></body></html>");
+                    return true;
+                }
+
+                var (headers, body) = ParsePhpOutput(output);
+
+                foreach (var header in headers)
+                {
+                    if (header.StartsWith("Content-Type:", StringComparison.OrdinalIgnoreCase))
+                    {
+                        response.ContentType = header.Substring("Content-Type:".Length).Trim();
+                    }
+                    else if (header.StartsWith("Status:", StringComparison.OrdinalIgnoreCase))
+                    {
+                        var statusPart = header.Substring("Status:".Length).Trim();
+                        if (int.TryParse(statusPart.Split(' ')[0], out var statusCode))
+                        {
+                            response.StatusCode = statusCode;
+                        }
+                    }
+                    else if (header.StartsWith("Location:", StringComparison.OrdinalIgnoreCase))
+                    {
+                        response.StatusCode = 302;
+                        response.Headers["Location"] = header.Substring("Location:".Length).Trim();
+                    }
+                    else if (header.StartsWith("Set-Cookie:", StringComparison.OrdinalIgnoreCase))
+                    {
+                        response.Headers.Append("Set-Cookie", header.Substring("Set-Cookie:".Length).Trim());
+                    }
+                    else if (!string.IsNullOrWhiteSpace(header))
+                    {
+                        var colonIndex = header.IndexOf(':');
+                        if (colonIndex > 0)
+                        {
+                            var headerName = header.Substring(0, colonIndex).Trim();
+                            var headerValue = header.Substring(colonIndex + 1).Trim();
+                            response.Headers[headerName] = headerValue;
+                        }
+                    }
+                }
+
+                if (!headers.Any(h => h.StartsWith("Content-Type:", StringComparison.OrdinalIgnoreCase)))
+                {
+                    response.ContentType = "text/html; charset=utf-8";
+                }
+
+                response.Headers["Cache-Control"] = "no-cache, must-revalidate";
+
+                await response.WriteAsync(body);
+                return true;
+            }
+            catch (Exception)
+            {
+                context.Response.StatusCode = 500;
+                context.Response.ContentType = "text/html; charset=utf-8";
+                await context.Response.WriteAsync("<html><body><h1>Internal Server Error</h1><p>Failed to execute PHP script.</p></body></html>");
+                return true;
+            }
+        }
+
+        private static (List<string> headers, string body) ParsePhpOutput(string output)
+        {
+            var headers = new List<string>();
+            var bodyStartIndex = output.IndexOf("\r\n\r\n");
+
+            if (bodyStartIndex == -1)
+            {
+                bodyStartIndex = output.IndexOf("\n\n");
+                if (bodyStartIndex == -1)
+                {
+                    return (headers, output);
+                }
+                var headerPart = output.Substring(0, bodyStartIndex);
+                var body = output.Substring(bodyStartIndex + 2);
+                headers = headerPart.Split('\n')
+                    .Select(h => h.TrimEnd('\r'))
+                    .Where(h => !string.IsNullOrWhiteSpace(h))
+                    .ToList();
+                return (headers, body);
+            }
+
+            var headersPart = output.Substring(0, bodyStartIndex);
+            var bodyContent = output.Substring(bodyStartIndex + 4);
+
+            headers = headersPart.Split(new[] { "\r\n" }, StringSplitOptions.None)
+                .Where(h => !string.IsNullOrWhiteSpace(h))
+                .ToList();
+
+            return (headers, bodyContent);
+        }
+
         private static async Task<bool> ServeCachedFile(HttpContext context, CachedFile cachedFile,
             bool supportsBrotli, bool supportsGzip)
         {
@@ -808,46 +1146,82 @@ namespace SharpPress
                 return true;
             }
 
-            byte[] fileContent = await File.ReadAllBytesAsync(filePath);
-            byte[] dataToSend = fileContent;
-            string encoding = null;
+            byte[] fileContent;
 
-            if (shouldCompress)
+            var fileLock = _fileLocks.GetOrAdd(relativePath, _ => new SemaphoreSlim(1, 1));
+            await fileLock.WaitAsync();
+            try
             {
-                if (supportsBrotli)
+                if (_cacheEnabled && _fileCache.TryGetValue(relativePath, out var cachedFile) && cachedFile.LastModified == lastModified)
                 {
-                    var compressed = await CompressBrotli(fileContent);
-                    if (compressed.Length < fileContent.Length * 0.9)
+                    return await ServeCachedFile(context, cachedFile, supportsBrotli, supportsGzip);
+                }
+
+                fileContent = await File.ReadAllBytesAsync(filePath);
+
+                byte[] dataToSend = fileContent;
+                string encoding = null;
+
+                if (shouldCompress)
+                {
+                    if (supportsBrotli)
                     {
-                        dataToSend = compressed;
-                        encoding = "br";
+                        var compressed = await CompressBrotli(fileContent);
+                        if (compressed.Length < fileContent.Length * 0.9)
+                        {
+                            dataToSend = compressed;
+                            encoding = "br";
+                        }
+                    }
+                    else if (supportsGzip)
+                    {
+                        var compressed = await CompressGzip(fileContent);
+                        if (compressed.Length < fileContent.Length * 0.9)
+                        {
+                            dataToSend = compressed;
+                            encoding = "gzip";
+                        }
                     }
                 }
-                else if (supportsGzip)
+
+                if (encoding != null)
                 {
-                    var compressed = await CompressGzip(fileContent);
-                    if (compressed.Length < fileContent.Length * 0.9)
-                    {
-                        dataToSend = compressed;
-                        encoding = "gzip";
-                    }
+                    context.Response.Headers["Content-Encoding"] = encoding;
+                }
+
+                context.Response.ContentLength = dataToSend.Length;
+                await context.Response.Body.WriteAsync(dataToSend);
+
+                if (shouldCache)
+                {
+                    await CacheFile(relativePath, fileContent, lastModified, contentType);
                 }
             }
-
-            if (encoding != null)
+            finally
             {
-                context.Response.Headers["Content-Encoding"] = encoding;
-            }
-
-            context.Response.ContentLength = dataToSend.Length;
-            await context.Response.Body.WriteAsync(dataToSend);
-
-            if (shouldCache && !_fileCache.ContainsKey(relativePath))
-            {
-                await CacheFile(relativePath, fileContent, lastModified, contentType);
+                fileLock.Release();
             }
 
             return true;
+        }
+
+        private static string ResolveClientIp(HttpRequest request)
+        {
+            var remote = request.HttpContext.Connection.RemoteIpAddress;
+            if (remote != null)
+            {
+                if (remote.IsIPv4MappedToIPv6)
+                    remote = remote.MapToIPv4();
+
+                if (TrustedProxies.Any(p => p.Equals(remote)))
+                {
+                    var xff = request.Headers["X-Forwarded-For"].FirstOrDefault();
+                    if (!string.IsNullOrWhiteSpace(xff))
+                        return xff.Split(',')[0].Trim();
+                }
+                return remote.ToString();
+            }
+            return "unknown";
         }
 
         private static async Task CacheFile(string relativePath, byte[] originalData,
@@ -871,11 +1245,14 @@ namespace SharpPress
                            (cachedFile.GzipData?.Length ?? 0) +
                            (cachedFile.BrotliData?.Length ?? 0);
 
-            if (_currentCacheSize + totalSize <= (MAX_CACHE_SIZE_MB * 1024 * 1024))
+            lock (_cacheLock)
             {
-                if (_fileCache.TryAdd(relativePath, cachedFile))
+                if (_currentCacheSize + totalSize <= (MAX_CACHE_SIZE_MB * 1024 * 1024))
                 {
-                    Interlocked.Add(ref _currentCacheSize, totalSize);
+                    if (_fileCache.TryAdd(relativePath, cachedFile))
+                    {
+                        _currentCacheSize += totalSize;
+                    }
                 }
             }
         }
@@ -887,7 +1264,11 @@ namespace SharpPress
                 var totalSize = removed.OriginalSize +
                                (removed.GzipData?.Length ?? 0) +
                                (removed.BrotliData?.Length ?? 0);
-                Interlocked.Add(ref _currentCacheSize, -totalSize);
+
+                lock (_cacheLock)
+                {
+                    _currentCacheSize -= totalSize;
+                }
             }
         }
 
@@ -977,6 +1358,47 @@ namespace SharpPress
             public DateTime LastModified { get; set; }
             public string ContentType { get; set; }
             public long OriginalSize { get; set; }
+        }
+
+        public static void SignalShutdown() => _isShuttingDown = true;
+        public static async Task RegisterServices(ServerConfig serverConfig)
+        {
+            if (serverConfig.SiteSettings != null && serverConfig.SiteSettings.Security != null)
+            {
+                allowRegisters = serverConfig.SiteSettings.Security.AllowRegistration;
+            }
+        }
+
+        public static void SetPhpExecutablePath(string path)
+        {
+            if (!string.IsNullOrEmpty(path) && File.Exists(path))
+            {
+                _phpExecutablePath = path;
+            }
+        }
+
+        public static void SetCacheEnabled(bool enabled)
+        {
+            _cacheEnabled = enabled;
+            if (!enabled)
+                ClearCache();
+        }
+
+        public static void ClearCache()
+        {
+            _fileCache.Clear();
+            _readCounts.Clear();
+            lock (_cacheLock)
+            {
+                _currentCacheSize = 0;
+            }
+        }
+
+        private static void AddSecurityHeaders(HttpContext context)
+        {
+            context.Response.Headers["X-Content-Type-Options"] = "nosniff";
+            context.Response.Headers["X-Frame-Options"] = "DENY";
+            context.Response.Headers["X-XSS-Protection"] = "1; mode=block";
         }
     }
 }

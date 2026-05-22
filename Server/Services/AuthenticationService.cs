@@ -77,9 +77,9 @@ namespace SharpPress.Services
                 Subject = new ClaimsIdentity(new[]
                 {
                     new Claim(ClaimTypes.Name, user.Username),
-                    new Claim(ClaimTypes.Role, user.Role),
-                    new Claim("uuid", user.uuid.ToString()),
-                    new Claim("email", user.Email)
+                    new Claim(ClaimTypes.Role, user.Roles.ToString()),
+                    new Claim("UUID", user.UUID),
+                    new Claim("Email", user.Email)
                 }),
                 Expires = DateTime.UtcNow.AddHours(_config.JwtExpiryHours),
                 SigningCredentials = new SigningCredentials(_jwtKey, SecurityAlgorithms.HmacSha256Signature)
@@ -95,6 +95,31 @@ namespace SharpPress.Services
             using var rng = RandomNumberGenerator.Create();
             rng.GetBytes(randomNumber);
             return Convert.ToBase64String(randomNumber);
+        }
+
+        public string? TryRenewTokenIfExpiringSoon(string currentToken, User user, int minutesBeforeExpiry = 960)
+        {
+            try
+            {
+                var handler = new JwtSecurityTokenHandler();
+                if (!handler.CanReadToken(currentToken)) return null;
+
+                var jwtToken = handler.ReadJwtToken(currentToken);
+                var expClaim = jwtToken.Claims.FirstOrDefault(c => c.Type == JwtRegisteredClaimNames.Exp);
+
+                if (expClaim == null) return null;
+
+                var expTime = DateTimeOffset.FromUnixTimeSeconds(long.Parse(expClaim.Value));
+                var now = DateTimeOffset.UtcNow;
+
+                if (expTime - now <= TimeSpan.FromMinutes(minutesBeforeExpiry))
+                {
+                    return GenerateJwtToken(user);
+                }
+            }
+            catch { }
+
+            return null;
         }
 
         public ClaimsPrincipal GetPrincipalFromExpiredToken(string token)

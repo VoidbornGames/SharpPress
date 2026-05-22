@@ -1,15 +1,10 @@
 ﻿@page "/admin"
+@model SharpPress.Pages.AdminModel
 @inject SharpPress.Services.UserService _userService
 @inject SharpPress.Services.PluginManager _pluginManager
-@inject SharpPress.Services.VideoService _videoService
 
 @using System.Diagnostics
-@using System.Linq
-@using System.Text
-
-@{
-    async Task<string> getUpTime() => (DateTime.Now - Process.GetCurrentProcess().StartTime).ToString(@"hh\:mm\:ss");
-}
+@using System.Net.NetworkInformation
 
 @{
     Layout = "_AdminLayout";
@@ -19,110 +14,435 @@
     string[] logs = System.IO.File.Exists(logFile) ? System.IO.File.ReadLines(logFile).Reverse().Take(200).Reverse().ToArray() : Array.Empty<string>();
 }
 
+<style>
+    .dashboard-stats-grid {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(235px, 1fr));
+        gap: 1.25rem;
+        margin-bottom: 2rem;
+    }
 
+    .dashboard-stat-box {
+        background: linear-gradient(145deg, rgba(30, 41, 59, 0.9), rgba(15, 23, 42, 0.6));
+        padding: 1.5rem 1.75rem;
+        border-radius: 16px;
+        border: 1px solid rgba(255, 255, 255, 0.06);
+        display: flex;
+        align-items: center;
+        gap: 1.25rem;
+        transition: all 0.35s cubic-bezier(0.4, 0, 0.2, 1);
+        position: relative;
+        overflow: hidden;
+    }
 
-<div class="stats-grid">
-    <div class="stat-box">
-        <div class="stat-label">UpTime</div>
-        <div class="stat-value" id="uptime">
-            <p id="uptime">Loading...</p>
+        .dashboard-stat-box::before {
+            content: '';
+            position: absolute;
+            top: 0;
+            left: 0;
+            right: 0;
+            height: 1px;
+            background: linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.08), transparent);
+        }
+
+        .dashboard-stat-box:hover {
+            transform: translateY(-4px);
+            border-color: rgba(255, 255, 255, 0.1);
+            box-shadow: 0 16px 48px rgba(0, 0, 0, 0.3), 0 0 0 1px rgba(255, 255, 255, 0.04) inset;
+        }
+
+    .stat-icon-wrap {
+        width: 48px;
+        height: 48px;
+        border-radius: 14px;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        flex-shrink: 0;
+        position: relative;
+    }
+
+        .stat-icon-wrap svg {
+            width: 22px;
+            height: 22px;
+            stroke: currentColor;
+            fill: none;
+            stroke-width: 1.8;
+            stroke-linecap: round;
+            stroke-linejoin: round;
+        }
+
+        .stat-icon-wrap.icon-indigo {
+            background: rgba(79, 70, 229, 0.12);
+            color: #818cf8;
+        }
+
+        .stat-icon-wrap.icon-emerald {
+            background: rgba(16, 185, 129, 0.12);
+            color: #34d399;
+        }
+
+        .stat-icon-wrap.icon-amber {
+            background: rgba(245, 158, 11, 0.12);
+            color: #fbbf24;
+        }
+
+        .stat-icon-wrap.icon-rose {
+            background: rgba(244, 63, 94, 0.12);
+            color: #fb7185;
+        }
+
+        .stat-icon-wrap.icon-sky {
+            background: rgba(14, 165, 233, 0.12);
+            color: #38bdf8;
+        }
+
+        .stat-icon-wrap.icon-violet {
+            background: rgba(139, 92, 246, 0.12);
+            color: #a78bfa;
+        }
+
+        .stat-icon-wrap.icon-teal {
+            background: rgba(20, 184, 166, 0.12);
+            color: #2dd4bf;
+        }
+
+        .stat-icon-wrap.icon-cyan {
+            background: rgba(6, 182, 212, 0.12);
+            color: #22d3ee;
+        }
+
+    .stat-content {
+        display: flex;
+        flex-direction: column;
+        min-width: 0;
+    }
+
+    .dashboard-stat-label {
+        font-size: 0.75rem;
+        color: rgba(148, 163, 184, 0.8);
+        text-transform: uppercase;
+        letter-spacing: 1.5px;
+        font-weight: 600;
+        margin-bottom: 4px;
+    }
+
+    .dashboard-stat-value {
+        font-size: 1.15rem;
+        font-weight: 700;
+        color: #f1f5f9;
+        letter-spacing: -0.3px;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+    }
+
+    .dashboard-card {
+        background: linear-gradient(145deg, rgba(30, 41, 59, 0.9), rgba(15, 23, 42, 0.6));
+        border: 1px solid rgba(255, 255, 255, 0.06);
+        border-radius: 16px;
+        overflow: hidden;
+        position: relative;
+    }
+
+        .dashboard-card::before {
+            content: '';
+            position: absolute;
+            top: 0;
+            left: 0;
+            right: 0;
+            height: 1px;
+            background: linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.08), transparent);
+            z-index: 1;
+        }
+
+    .dashboard-card-header {
+        padding: 1.25rem 1.75rem;
+        border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 1rem;
+    }
+
+    .dashboard-card-title {
+        font-size: 1.1rem;
+        font-weight: 600;
+        color: #f1f5f9;
+        letter-spacing: -0.2px;
+        display: flex;
+        align-items: center;
+        gap: 10px;
+    }
+
+        .dashboard-card-title svg {
+            width: 18px;
+            height: 18px;
+            stroke: #818cf8;
+            fill: none;
+            stroke-width: 1.8;
+            stroke-linecap: round;
+            stroke-linejoin: round;
+        }
+
+    .log-count-badge {
+        font-size: 0.7rem;
+        font-weight: 700;
+        padding: 4px 10px;
+        border-radius: 20px;
+        background: rgba(79, 70, 229, 0.12);
+        color: #818cf8;
+        letter-spacing: 0.5px;
+    }
+
+    .dashboard-table-wrap {
+        max-height: 380px;
+        overflow-y: auto;
+        scrollbar-width: thin;
+        scrollbar-color: rgba(255, 255, 255, 0.08) transparent;
+    }
+
+        .dashboard-table-wrap::-webkit-scrollbar {
+            width: 6px;
+        }
+
+        .dashboard-table-wrap::-webkit-scrollbar-track {
+            background: transparent;
+        }
+
+        .dashboard-table-wrap::-webkit-scrollbar-thumb {
+            background: rgba(255, 255, 255, 0.08);
+            border-radius: 3px;
+        }
+
+            .dashboard-table-wrap::-webkit-scrollbar-thumb:hover {
+                background: rgba(255, 255, 255, 0.14);
+            }
+
+    .dashboard-table {
+        width: 100%;
+        border-collapse: collapse;
+    }
+
+        .dashboard-table tr {
+            transition: background 0.15s ease;
+        }
+
+            .dashboard-table tr:hover {
+                background: rgba(255, 255, 255, 0.02);
+            }
+
+        .dashboard-table td {
+            padding: 0.65rem 1.75rem;
+            border-bottom: 1px solid rgba(255, 255, 255, 0.04);
+            font-family: 'JetBrains Mono', 'Fira Code', 'SF Mono', 'Cascadia Code', monospace;
+            font-size: 0.8rem;
+            color: rgba(203, 213, 225, 0.85);
+            line-height: 1.6;
+            white-space: pre-wrap;
+            word-break: break-all;
+        }
+
+        .dashboard-table tr:last-child td {
+            border-bottom: none;
+        }
+
+    .dashboard-alert {
+        padding: 2.5rem 1.75rem;
+        text-align: center;
+        color: rgba(148, 163, 184, 0.6);
+        font-size: 0.9rem;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        gap: 12px;
+    }
+
+        .dashboard-alert svg {
+            width: 40px;
+            height: 40px;
+            stroke: rgba(148, 163, 184, 0.3);
+            fill: none;
+            stroke-width: 1.5;
+            stroke-linecap: round;
+            stroke-linejoin: round;
+        }
+
+    @@keyframes statFadeIn {
+        from {
+            opacity: 0;
+            transform: translateY(12px);
+        }
+
+        to {
+            opacity: 1;
+            transform: translateY(0);
+        }
+    }
+
+    .dashboard-stat-box {
+        animation: statFadeIn 0.5s cubic-bezier(0.4, 0, 0.2, 1) backwards;
+    }
+
+        .dashboard-stat-box:nth-child(1) {
+            animation-delay: 0.05s;
+        }
+
+        .dashboard-stat-box:nth-child(2) {
+            animation-delay: 0.1s;
+        }
+
+        .dashboard-stat-box:nth-child(3) {
+            animation-delay: 0.15s;
+        }
+
+        .dashboard-stat-box:nth-child(4) {
+            animation-delay: 0.2s;
+        }
+
+        .dashboard-stat-box:nth-child(5) {
+            animation-delay: 0.25s;
+        }
+
+        .dashboard-stat-box:nth-child(6) {
+            animation-delay: 0.3s;
+        }
+
+        .dashboard-stat-box:nth-child(7) {
+            animation-delay: 0.35s;
+        }
+
+        .dashboard-stat-box:nth-child(8) {
+            animation-delay: 0.4s;
+        }
+
+    @@keyframes cardFadeIn {
+        from {
+            opacity: 0;
+            transform: translateY(16px);
+        }
+
+        to {
+            opacity: 1;
+            transform: translateY(0);
+        }
+    }
+
+    .dashboard-card {
+        animation: cardFadeIn 0.5s cubic-bezier(0.4, 0, 0.2, 1) 0.45s backwards;
+    }
+</style>
+
+<div class="dashboard-stats-grid">
+    <div class="dashboard-stat-box">
+        <div class="stat-icon-wrap icon-indigo">
+            <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="10" /><polyline points="12 6 12 12 16 14" /></svg>
+        </div>
+        <div class="stat-content">
+            <div class="dashboard-stat-label">UpTime</div>
+            <div class="dashboard-stat-value">@Model.Uptime</div>
         </div>
     </div>
-    <div class="stat-box">
-        <div class="stat-label">CPU Usage</div>
-        <div class="stat-value">
-            <p id="cpuUsage">Loading...</p>
+    <div class="dashboard-stat-box">
+        <div class="stat-icon-wrap icon-emerald">
+            <svg viewBox="0 0 24 24"><rect x="4" y="4" width="16" height="16" rx="2" ry="2" /><rect x="9" y="9" width="6" height="6" /><line x1="9" y1="1" x2="9" y2="4" /><line x1="15" y1="1" x2="15" y2="4" /><line x1="9" y1="20" x2="9" y2="23" /><line x1="15" y1="20" x2="15" y2="23" /><line x1="20" y1="9" x2="23" y2="9" /><line x1="20" y1="14" x2="23" y2="14" /><line x1="1" y1="9" x2="4" y2="9" /><line x1="1" y1="14" x2="4" y2="14" /></svg>
+        </div>
+        <div class="stat-content">
+            <div class="dashboard-stat-label">CPU Usage</div>
+            <div class="dashboard-stat-value">@Model.CpuUsage%</div>
         </div>
     </div>
-    <div class="stat-box">
-        <div class="stat-label">Ram Usage</div>
-        <div class="stat-value">
-            <p id="memoryMB">Loading...</p>
+    <div class="dashboard-stat-box">
+        <div class="stat-icon-wrap icon-violet">
+            <svg viewBox="0 0 24 24"><rect x="2" y="6" width="20" height="12" rx="2" /><line x1="6" y1="12" x2="6.01" y2="12" /><line x1="10" y1="12" x2="10.01" y2="12" /></svg>
+        </div>
+        <div class="stat-content">
+            <div class="dashboard-stat-label">Ram Usage</div>
+            <div class="dashboard-stat-value">@Model.MemoryMB MB</div>
         </div>
     </div>
-    <div class="stat-box">
-        <div class="stat-label">Users</div>
-        <div class="stat-value">
-            <p id="users">Loading...</p>
+    <div class="dashboard-stat-box">
+        <div class="stat-icon-wrap icon-sky">
+            <svg viewBox="0 0 24 24"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2" /><circle cx="9" cy="7" r="4" /><path d="M23 21v-2a4 4 0 0 0-3-3.87" /><path d="M16 3.13a4 4 0 0 1 0 7.75" /></svg>
+        </div>
+        <div class="stat-content">
+            <div class="dashboard-stat-label">Users</div>
+            <div class="dashboard-stat-value">@Model.Users</div>
         </div>
     </div>
-    <div class="stat-box">
-        <div class="stat-label">Disk Usage</div>
-        <div class="stat-value">
-            <p id="diskUsedGB">Loading...</p>
+    <div class="dashboard-stat-box">
+        <div class="stat-icon-wrap icon-amber">
+            <svg viewBox="0 0 24 24"><line x1="22" y1="12" x2="2" y2="12" /><path d="M5.45 5.11L2 12v6a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-6l-3.45-6.89A2 2 0 0 0 16.76 4H7.24a2 2 0 0 0-1.79 1.11z" /><line x1="6" y1="16" x2="6.01" y2="16" /><line x1="10" y1="16" x2="10.01" y2="16" /></svg>
+        </div>
+        <div class="stat-content">
+            <div class="dashboard-stat-label">Disk Usage</div>
+            <div class="dashboard-stat-value">@Model.DiskUsedGB / @Model.DiskTotalGB GB</div>
         </div>
     </div>
-    <div class="stat-box">
-        <div class="stat-label">Downloaded</div>
-        <div class="stat-value">
-            <p id="netReceivedMB">Loading...</p>
+    <div class="dashboard-stat-box">
+        <div class="stat-icon-wrap icon-teal">
+            <svg viewBox="0 0 24 24"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" /><polyline points="7 10 12 15 17 10" /><line x1="12" y1="15" x2="12" y2="3" /></svg>
+        </div>
+        <div class="stat-content">
+            <div class="dashboard-stat-label">Downloaded</div>
+            <div class="dashboard-stat-value">@Model.NetReceivedMB MB</div>
         </div>
     </div>
-    <div class="stat-box">
-        <div class="stat-label">Uploaded</div>
-        <div class="stat-value">
-            <p id="netSentMB">Loading...</p>
+    <div class="dashboard-stat-box">
+        <div class="stat-icon-wrap icon-cyan">
+            <svg viewBox="0 0 24 24"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" /><polyline points="17 8 12 3 7 8" /><line x1="12" y1="3" x2="12" y2="15" /></svg>
+        </div>
+        <div class="stat-content">
+            <div class="dashboard-stat-label">Uploaded</div>
+            <div class="dashboard-stat-value">@Model.NetSentMB MB</div>
         </div>
     </div>
-    <div class="stat-box">
-        <div class="stat-label">Active Plugins</div>
-        <div class="stat-value">
-            <p id="activePlugins">Loading...</p>
+    <div class="dashboard-stat-box">
+        <div class="stat-icon-wrap icon-rose">
+            <svg viewBox="0 0 24 24"><path d="M12 2v6m0 8v6M4.93 4.93l4.24 4.24m5.66 5.66l4.24 4.24M2 12h6m8 0h6M4.93 19.07l4.24-4.24m5.66-5.66l4.24-4.24" /></svg>
+        </div>
+        <div class="stat-content">
+            <div class="dashboard-stat-label">Active Plugins</div>
+            <div class="dashboard-stat-value">@Model.ActivePlugins</div>
         </div>
     </div>
 </div>
 
-
-<div class="card">
-    <div class="card-header">
-        <div class="card-title">System Logs</div>
+<div class="dashboard-card">
+    <div class="dashboard-card-header">
+        <div class="dashboard-card-title">
+            <svg viewBox="0 0 24 24"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" /><polyline points="14 2 14 8 20 8" /><line x1="16" y1="13" x2="8" y2="13" /><line x1="16" y1="17" x2="8" y2="17" /><polyline points="10 9 9 9 8 9" /></svg>
+            System Logs
+        </div>
+        @if (logs.Length > 0)
+        {
+            <span class="log-count-badge">@logs.Length ENTRIES</span>
+        }
     </div>
 
     @if (logs.Length <= 0)
     {
-        <div class="alert alert-info">No logs available.</div>
+        <div class="dashboard-alert">
+            <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="10" /><line x1="12" y1="8" x2="12" y2="12" /><line x1="12" y1="16" x2="12.01" y2="16" /></svg>
+            No logs available.
+        </div>
     }
     else
     {
-        <div class="table-container" style="max-height: 300px; overflow-y: auto;">
-            <table>
+        <div class="dashboard-table-wrap">
+            <table class="dashboard-table">
                 @foreach (var log in logs)
                 {
+                    string rowStyle = string.Empty;
+                    if (log.Contains("ERR")) rowStyle = "style=\"color: #fca5a5;\"";
+                    else if (log.Contains("WRN")) rowStyle = "style=\"color: #fde68a;\"";
+                    else if (log.Contains("INF")) rowStyle = "style=\"color: #93c5fd;\"";
+
                     <tr>
-                        <td style="font-family: monospace; font-size: 0.85rem;">@log</td>
+                        <td @rowStyle>@log</td>
                     </tr>
                 }
             </table>
         </div>
     }
 </div>
-
-
-<script>
-    async function fetchStats() {
-        try {
-            const response = await apiRequest('/api/stats', { method: 'GET'});
-            const data = await response.json();
-
-            const setText = (id, val, suffix = "") => {
-                const el = document.getElementById(id);
-                if (el) el.textContent = val + suffix;
-            };
-
-            setText("uptime", data.uptime);
-            setText("users", data.users);
-            setText("cpuUsage", data.cpuUsage, "%");
-            setText("memoryMB", data.memoryMB.toFixed(2), " MB");
-            setText("diskUsedGB", `${data.diskUsedGB.toFixed(2)} / ${data.diskTotalGB.toFixed(2)}`, " GB");
-            setText("netReceivedMB", data.netReceivedMB.toFixed(2), " MB");
-            setText("netSentMB", data.netSentMB.toFixed(2), " MB");
-            setText("activePlugins", data.activePlugins);
-        }
-        catch (error) {
-            console.error('Error fetching stats:', error);
-        }
-    }
-
-    fetchStats();
-    setInterval(fetchStats, 1000);
-</script>

@@ -68,4 +68,34 @@ namespace SharpPress.Services
             }
         }
     }
+
+    internal class LoggerAdapter : ILogger<FeatherDatabase>
+    {
+        private readonly Logger _logger;
+        public LoggerAdapter(Logger logger) => _logger = logger;
+        public IDisposable BeginScope<TState>(TState state) => NullDisposable.Instance;
+        public bool IsEnabled(LogLevel logLevel) => true;
+        public void Log<TState>(LogLevel logLevel, EventId eventId, TState state, Exception? exception, Func<TState, Exception?, string> formatter)
+        {
+            var message = formatter(state, exception);
+            switch (logLevel)
+            {
+                case LogLevel.Error:
+                case LogLevel.Critical:
+                    _logger.LogError(message);
+                    break;
+                case LogLevel.Warning:
+                    _logger.LogWarning(message);
+                    break;
+                default:
+                    _logger.Log(message);
+                    break;
+            }
+        }
+        private class NullDisposable : IDisposable
+        {
+            public void Dispose() { }
+            public static readonly NullDisposable Instance = new();
+        }
+    }
 }

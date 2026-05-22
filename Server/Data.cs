@@ -78,11 +78,11 @@ namespace SharpPress.Models
 
     public class User : FeatherData
     {
-        public string Username { get; set; } = "";
+        [StringLength(48)] public string UUID { get; set; } = Guid.NewGuid().ToString();
+        [StringLength(96)] public string Username { get; set; } = "";
         public string Password { get; set; } = "";
         public string Email { get; set; } = "";
-        public Guid uuid { get; set; }
-        public string Role { get; set; } = "player";
+        public UserRole Roles { get; set; } = UserRole.User;
         public bool TwoFactorEnabled { get; set; } = false;
         public string TwoFactorSecret { get; set; } = "";
         public DateTime LastLogin { get; set; } = DateTime.UtcNow;
@@ -92,6 +92,33 @@ namespace SharpPress.Models
         public DateTime RefreshTokenExpiry { get; set; } = DateTime.UtcNow.AddDays(7);
         public string PasswordResetToken { get; set; }
         public DateTime PasswordResetTokenExpiry { get; set; }
+        public bool IsActive { get; set; }
+        public bool IsVerified { get; set; }
+        public DateTime UpdatedAt { get; set; } = DateTime.UtcNow;
+        public DateTime LastActive { get; set; } = DateTime.UtcNow;
+
+        public bool HasAnyRole(UserRole roles) => (Roles & roles) != 0;
+        public bool HasAllRoles(UserRole roles) => (Roles & roles) == roles;
+        public bool IsAtLeastUser() => HasAnyRole(UserRole.User | UserRole.Moderator | UserRole.Support | UserRole.Admin);
+        public bool HasRole(UserRole role)
+        {
+            if (Roles == UserRole.Banned)
+                return false;
+
+            if ((Roles & UserRole.Admin) != 0)
+                return true;
+
+            if (role == UserRole.Support)
+                return (Roles & UserRole.Support) != 0 || (Roles & UserRole.Admin) != 0;
+
+            if (role == UserRole.Moderator)
+                return (Roles & UserRole.Moderator) != 0 || (Roles & UserRole.Support) != 0 || (Roles & UserRole.Admin) != 0;
+
+            if (role == UserRole.User)
+                return Roles != UserRole.Banned;
+
+            return (Roles & role) != 0;
+        }
     }
 
     public class FeatherData
@@ -99,12 +126,22 @@ namespace SharpPress.Models
         public int Id { get; set; }
     }
 
+    [Flags]
+    public enum UserRole
+    {
+        Banned = 0,
+        User = 1 << 0,
+        Moderator = 1 << 1,
+        Support = 1 << 2,
+        Admin = 1 << 4
+    }
+
     public class ServerConfig
     {
         public bool DebugMode { get; set; } = false;
         public string ADMIN_PASSWORD { get; set; } = "admin123";
         public string JwtSecret { get; set; } = "your-super-secret-jwt-key-change-this-in-production-32-chars-min";
-        public SiteSettings SiteSettings { get; set; }
+        public SiteSettings SiteSettings { get; set; } = new SiteSettings();
         public string PanelDomain { get; set; } = "example.com";
         public int MaxFailedLoginAttempts { get; set; } = 5;
         public int LockoutDurationMinutes { get; set; } = 3;

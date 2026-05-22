@@ -1,38 +1,856 @@
 ﻿@page "/admin/users"
+@model SharpPress.Pages.UsersModel
 @inject SharpPress.Services.FeatherDatabase database
-@inject SharpPress.Services.UserService userService
 
 @{
     Layout = "_AdminLayout";
     ViewData["Title"] = "Users";
 }
 
-<div class="card">
-    <div class="card-header">
-        <div class="card-title">Plugin Management</div>
-    </div>
-    <div class="alert alert-info">
-        Manage, upload, and configure your extensions here.
-    </div>
-    <div class="table-container">
-        <table>
-            <thead>
-                <tr>
-                    <th>Username</th>
-                    <th>Role</th>
-                    <th>GUID</th>
-                </tr>
-            </thead>
-            <tbody>
-                @foreach (var p in userService.Users)
-                {
-                    <tr>
-                        <td>@p.Username</td>
-                        <td>@p.Role</td>
-                        <td>@p.uuid.ToString()</td>
-                    </tr>
-                }
-            </tbody>
-        </table>
+<style>
+    .users-header {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        margin-bottom: 2rem;
+    }
+
+    .users-title {
+        font-size: 1.5rem;
+        font-weight: 700;
+        color: var(--text-white);
+        margin-bottom: 0.5rem;
+    }
+
+    .users-subtitle {
+        color: var(--text-muted);
+        font-size: 0.95rem;
+    }
+
+    .users-stats {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+        gap: 1rem;
+        margin-bottom: 2rem;
+    }
+
+    .stat-card {
+        background: rgba(255, 255, 255, 0.03);
+        border: 1px solid var(--border-subtle);
+        border-radius: var(--radius-md);
+        padding: 1rem;
+        transition: all 0.2s ease;
+    }
+
+        .stat-card:hover {
+            border-color: var(--primary);
+            background: rgba(79, 70, 229, 0.05);
+            transform: translateY(-2px);
+        }
+
+    .stat-number {
+        font-size: 1.75rem;
+        font-weight: 700;
+        color: var(--primary);
+    }
+
+    .stat-label {
+        font-size: 0.85rem;
+        color: var(--text-muted);
+        margin-top: 0.5rem;
+        text-transform: uppercase;
+        letter-spacing: 0.5px;
+    }
+
+    .users-table-container {
+        background: var(--bg-card);
+        border: 1px solid var(--border-subtle);
+        border-radius: var(--radius-lg);
+        overflow: hidden;
+    }
+
+    .table-wrapper {
+        overflow-x: auto;
+    }
+
+    .users-table {
+        width: 100%;
+        border-collapse: collapse;
+    }
+
+        .users-table thead {
+            background: rgba(255, 255, 255, 0.02);
+            border-bottom: 1px solid var(--border-subtle);
+        }
+
+        .users-table th {
+            padding: 1rem 1.25rem;
+            text-align: left;
+            font-weight: 600;
+            color: var(--text-muted);
+            font-size: 0.85rem;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+        }
+
+        .users-table tbody tr {
+            border-bottom: 1px solid var(--border-subtle);
+            transition: all 0.2s ease;
+        }
+
+            .users-table tbody tr:hover {
+                background: rgba(255, 255, 255, 0.03);
+            }
+
+        .users-table td {
+            padding: 1rem 1.25rem;
+            color: var(--text-main);
+        }
+
+    .user-cell {
+        display: flex;
+        align-items: center;
+        gap: 0.75rem;
+    }
+
+    .user-avatar {
+        width: 40px;
+        height: 40px;
+        background: linear-gradient(135deg, var(--primary), var(--accent));
+        border-radius: 50%;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        font-weight: 700;
+        color: white;
+        font-size: 1rem;
+    }
+
+    .user-info {
+        display: flex;
+        flex-direction: column;
+    }
+
+    .user-name {
+        font-weight: 600;
+        color: var(--text-white);
+    }
+
+    .user-email {
+        font-size: 0.85rem;
+        color: var(--text-muted);
+    }
+
+    .role-badge {
+        display: inline-flex;
+        align-items: center;
+        gap: 0.4rem;
+        padding: 0.4rem 0.8rem;
+        border-radius: 20px;
+        font-size: 0.75rem;
+        font-weight: 600;
+        white-space: nowrap;
+    }
+
+    .role-admin {
+        background: rgba(239, 68, 68, 0.15);
+        color: #ff6b6b;
+        border: 1px solid rgba(239, 68, 68, 0.3);
+    }
+
+    .role-support {
+        background: rgba(59, 130, 246, 0.15);
+        color: #60a5fa;
+        border: 1px solid rgba(59, 130, 246, 0.3);
+    }
+
+    .role-moderator {
+        background: rgba(168, 85, 247, 0.15);
+        color: #d8b4fe;
+        border: 1px solid rgba(168, 85, 247, 0.3);
+    }
+
+    .role-user {
+        background: rgba(16, 185, 129, 0.15);
+        color: #6ee7b7;
+        border: 1px solid rgba(16, 185, 129, 0.3);
+    }
+
+    .role-banned {
+        background: rgba(107, 114, 128, 0.15);
+        color: #d1d5db;
+        border: 1px solid rgba(107, 114, 128, 0.3);
+    }
+
+    .status-indicator {
+        display: inline-flex;
+        align-items: center;
+        gap: 0.5rem;
+        font-size: 0.85rem;
+    }
+
+        .status-indicator::before {
+            content: '';
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+            background: var(--success);
+        }
+
+        .status-indicator.offline::before {
+            background: var(--text-muted);
+        }
+
+        .status-indicator.locked::before {
+            background: var(--danger);
+        }
+
+    .uuid-cell {
+        font-family: 'Courier New', monospace;
+        font-size: 0.8rem;
+        color: var(--text-muted);
+        max-width: 200px;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+    }
+
+    .action-cell {
+        display: flex;
+        gap: 0.5rem;
+    }
+
+    .btn-icon {
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        width: 32px;
+        height: 32px;
+        border: 1px solid var(--border-subtle);
+        background: rgba(255, 255, 255, 0.03);
+        border-radius: var(--radius-sm);
+        cursor: pointer;
+        transition: all 0.2s ease;
+        color: var(--text-muted);
+        padding: 0;
+    }
+
+        .btn-icon:hover {
+            background: rgba(79, 70, 229, 0.15);
+            border-color: var(--primary);
+            color: var(--primary);
+        }
+
+        .btn-icon svg {
+            width: 16px;
+            height: 16px;
+            stroke: currentColor;
+            fill: none;
+            stroke-width: 2;
+            stroke-linecap: round;
+            stroke-linejoin: round;
+        }
+
+    .empty-state {
+        text-align: center;
+        padding: 4rem 2rem;
+        color: var(--text-muted);
+    }
+
+    .empty-state-icon {
+        font-size: 4rem;
+        margin-bottom: 1rem;
+        opacity: 0.5;
+    }
+
+    .empty-state-title {
+        font-size: 1.25rem;
+        color: var(--text-white);
+        margin-bottom: 0.5rem;
+        font-weight: 600;
+    }
+
+    .empty-state-text {
+        font-size: 0.95rem;
+    }
+
+    .verification-badge {
+        display: inline-flex;
+        align-items: center;
+        gap: 0.3rem;
+        padding: 0.3rem 0.6rem;
+        background: rgba(16, 185, 129, 0.1);
+        border: 1px solid rgba(16, 185, 129, 0.3);
+        border-radius: 4px;
+        font-size: 0.7rem;
+        color: var(--success);
+        font-weight: 600;
+    }
+
+    .two-factor-badge {
+        display: inline-flex;
+        align-items: center;
+        gap: 0.3rem;
+        padding: 0.3rem 0.6rem;
+        background: rgba(168, 85, 247, 0.1);
+        border: 1px solid rgba(168, 85, 247, 0.3);
+        border-radius: 4px;
+        font-size: 0.7rem;
+        color: #d8b4fe;
+        font-weight: 600;
+    }
+
+    .user-badges {
+        display: flex;
+        gap: 0.5rem;
+        flex-wrap: wrap;
+    }
+
+    .modal {
+        display: none;
+        position: fixed;
+        top: 0;
+        left: 0;
+        right: 0;
+        bottom: 0;
+        background: rgba(0, 0, 0, 0.7);
+        backdrop-filter: blur(4px);
+        z-index: 1000;
+        align-items: center;
+        justify-content: center;
+    }
+
+        .modal.active {
+            display: flex;
+        }
+
+    .modal-content {
+        background: var(--bg-card);
+        border: 1px solid var(--border-subtle);
+        border-radius: var(--radius-lg);
+        padding: 2rem;
+        max-width: 500px;
+        width: 90%;
+        max-height: 80vh;
+        overflow-y: auto;
+    }
+
+    .modal-header {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        margin-bottom: 1.5rem;
+    }
+
+    .modal-title {
+        font-size: 1.5rem;
+        font-weight: 700;
+        color: var(--text-white);
+    }
+
+    .modal-close {
+        background: none;
+        border: none;
+        color: var(--text-muted);
+        cursor: pointer;
+        font-size: 1.5rem;
+        padding: 0;
+        width: 32px;
+        height: 32px;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        transition: all 0.2s ease;
+    }
+
+        .modal-close:hover {
+            color: var(--text-white);
+        }
+
+    .modal-section {
+        margin-bottom: 1.5rem;
+    }
+
+    .modal-label {
+        font-size: 0.85rem;
+        color: var(--text-muted);
+        text-transform: uppercase;
+        letter-spacing: 0.5px;
+        font-weight: 600;
+        margin-bottom: 0.5rem;
+    }
+
+    .modal-value {
+        font-size: 1rem;
+        color: var(--text-white);
+    }
+
+    .modal-actions {
+        display: flex;
+        gap: 1rem;
+        margin-top: 2rem;
+        flex-wrap: wrap;
+    }
+
+    .btn-modal {
+        flex: 1;
+        min-width: 120px;
+        padding: 0.75rem 1rem;
+        border: none;
+        border-radius: var(--radius-md);
+        font-size: 0.85rem;
+        font-weight: 600;
+        cursor: pointer;
+        transition: all 0.2s ease;
+    }
+
+    .btn-ban {
+        background: rgba(239, 68, 68, 0.15);
+        color: var(--danger);
+        border: 1px solid rgba(239, 68, 68, 0.3);
+    }
+
+        .btn-ban:hover {
+            background: rgba(239, 68, 68, 0.25);
+        }
+
+    .btn-lock {
+        background: rgba(168, 85, 247, 0.15);
+        color: #d8b4fe;
+        border: 1px solid rgba(168, 85, 247, 0.3);
+    }
+
+        .btn-lock:hover {
+            background: rgba(168, 85, 247, 0.25);
+        }
+
+    .btn-reset {
+        background: rgba(59, 130, 246, 0.15);
+        color: #60a5fa;
+        border: 1px solid rgba(59, 130, 246, 0.3);
+    }
+
+        .btn-reset:hover {
+            background: rgba(59, 130, 246, 0.25);
+        }
+
+    .btn-delete {
+        background: rgba(239, 68, 68, 0.15);
+        color: var(--danger);
+        border: 1px solid rgba(239, 68, 68, 0.3);
+    }
+
+        .btn-delete:hover {
+            background: rgba(239, 68, 68, 0.25);
+        }
+
+    .btn-primary {
+        background: linear-gradient(135deg, var(--primary), #4338ca);
+        color: white;
+        border: none;
+    }
+
+        .btn-primary:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 4px 12px rgba(79, 70, 229, 0.3);
+        }
+
+    .toast {
+        position: fixed;
+        bottom: 2rem;
+        right: 2rem;
+        background: var(--bg-card);
+        border: 1px solid var(--border-subtle);
+        border-radius: var(--radius-md);
+        padding: 1rem 1.5rem;
+        max-width: 400px;
+        z-index: 2000;
+        animation: slideIn 0.3s ease;
+    }
+
+    @@keyframes slideIn {
+        from {
+            transform: translateX(400px);
+            opacity: 0;
+        }
+
+        to {
+            transform: translateX(0);
+            opacity: 1;
+        }
+    }
+
+    .toast.success {
+        border-left: 4px solid var(--success);
+    }
+
+    .toast.error {
+        border-left: 4px solid var(--danger);
+    }
+</style>
+
+<div class="users-header">
+    <div>
+        <h1 class="users-title">User Management</h1>
+        <p class="users-subtitle">Manage user accounts and permissions</p>
     </div>
 </div>
+
+@{
+    var users = (await database.GetPagedByLinq<User>(1, 100, u => true, u => u.Id, true)).ToList();
+    var activeCount = users.Count(u => u.IsActive && u.LastActive > DateTime.UtcNow.AddDays(-7));
+    var adminCount = users.Count(u => u.HasRole(UserRole.Admin));
+}
+
+<div class="users-stats">
+    <div class="stat-card">
+        <div class="stat-number">@users.Count</div>
+        <div class="stat-label">Total Users</div>
+    </div>
+    <div class="stat-card">
+        <div class="stat-number">@activeCount</div>
+        <div class="stat-label">Active Users</div>
+    </div>
+    <div class="stat-card">
+        <div class="stat-number">@adminCount</div>
+        <div class="stat-label">Admins</div>
+    </div>
+    <div class="stat-card">
+        <div class="stat-number">@users.Count(u => u.TwoFactorEnabled)</div>
+        <div class="stat-label">2FA Enabled</div>
+    </div>
+</div>
+
+@if (users.Count > 0)
+{
+    <div class="users-table-container">
+        <div class="table-wrapper">
+            <table class="users-table">
+                <thead>
+                    <tr>
+                        <th>User</th>
+                        <th>Role</th>
+                        <th>Status</th>
+                        <th>Last Active</th>
+                        <th>UUID</th>
+                        <th style="width: 100px;">Actions</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    @foreach (var user in users)
+                    {
+                        var isLocked = user.LockedUntil.HasValue && user.LockedUntil > DateTime.UtcNow;
+                        var statusClass = isLocked ? "locked" : (user.IsActive ? "" : "offline");
+                        var statusText = isLocked ? "Locked" : (user.IsActive ? "Online" : "Offline");
+                        var roleClass = $"role-{user.Roles.ToString().ToLowerInvariant()}";
+                        var initials = new string(user.Username.Where(char.IsUpper).Take(2).ToArray());
+                        if (string.IsNullOrEmpty(initials))
+                            initials = user.Username.Substring(0, Math.Min(2, user.Username.Length)).ToUpper();
+
+                        <tr>
+                            <td>
+                                <div class="user-cell">
+                                    <div class="user-avatar">@initials</div>
+                                    <div class="user-info">
+                                        <div class="user-name">@user.Username</div>
+                                        <div class="user-email">@user.Email</div>
+                                    </div>
+                                </div>
+                            </td>
+                            <td>
+                                <span class="role-badge @roleClass">
+                                    @user.Roles
+                                </span>
+                            </td>
+                            <td>
+                                <div class="user-badges">
+                                    <span class="status-indicator @statusClass">@statusText</span>
+                                    @if (user.IsVerified)
+                                    {
+                                        <div class="verification-badge">
+                                            <span>✓</span>
+                                            Verified
+                                        </div>
+                                    }
+                                    @if (user.TwoFactorEnabled)
+                                    {
+                                        <div class="two-factor-badge">
+                                            <span>🔐</span>
+                                            2FA
+                                        </div>
+                                    }
+                                </div>
+                            </td>
+                            <td>
+                                @if (user.LastActive > DateTime.UtcNow.AddMinutes(-5))
+                                {
+                                    <span style="color: var(--success);">Just now</span>
+                                }
+                                else if (user.LastActive > DateTime.UtcNow.AddHours(-1))
+                                {
+                                    <span>@Math.Round((DateTime.UtcNow - user.LastActive).TotalMinutes)m ago</span>
+                                }
+                                else if (user.LastActive > DateTime.UtcNow.AddDays(-1))
+                                {
+                                    <span>@Math.Round((DateTime.UtcNow - user.LastActive).TotalHours)h ago</span>
+                                }
+                                else
+                                {
+                                    <span style="color: var(--text-muted);">@user.LastActive.ToString("MMM dd")</span>
+                                }
+                            </td>
+                            <td>
+                                <div class="uuid-cell" title="@user.UUID">@user.UUID.Substring(0, 8)...</div>
+                            </td>
+                            <td>
+                                <div class="action-cell">
+                                    <button class="btn-icon" onclick="openUserModal('@user.UUID')" title="View & manage user">
+                                        <svg viewBox="0 0 24 24"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z" /><circle cx="12" cy="12" r="3" /></svg>
+                                    </button>
+                                </div>
+                            </td>
+                        </tr>
+                    }
+                </tbody>
+            </table>
+        </div>
+    </div>
+}
+else
+{
+    <div class="users-table-container">
+        <div class="empty-state">
+            <div class="empty-state-icon">👥</div>
+            <div class="empty-state-title">No Users Found</div>
+            <div class="empty-state-text">Users will appear here once they register</div>
+        </div>
+    </div>
+}
+
+<div id="userModal" class="modal">
+    <div class="modal-content">
+        <div class="modal-header">
+            <h2 class="modal-title">User Details</h2>
+            <button class="modal-close" onclick="closeUserModal()">×</button>
+        </div>
+
+        <div id="userDetails" style="display: none;">
+            <div class="modal-section">
+                <div class="modal-label">Username</div>
+                <div class="modal-value" id="detailUsername"></div>
+            </div>
+
+            <div class="modal-section">
+                <div class="modal-label">Email</div>
+                <div class="modal-value" id="detailEmail"></div>
+            </div>
+
+            <div class="modal-section">
+                <div class="modal-label">UUID</div>
+                <div class="modal-value" id="detailUUID" style="font-family: monospace; font-size: 0.9rem;"></div>
+            </div>
+
+            <div class="modal-section">
+                <div class="modal-label">Role</div>
+                <div class="modal-value" id="detailRole"></div>
+            </div>
+
+            <div class="modal-section">
+                <div class="modal-label">Status</div>
+                <div class="modal-value" id="detailStatus"></div>
+            </div>
+
+            <div class="modal-section">
+                <div class="modal-label">Last Active</div>
+                <div class="modal-value" id="detailLastActive"></div>
+            </div>
+
+            <div class="modal-actions" id="modalActions">
+            </div>
+        </div>
+
+        <div id="userLoading" style="text-align: center; color: var(--text-muted);">
+            <p>Loading user details...</p>
+        </div>
+    </div>
+</div>
+
+<script>
+    let currentUserUUID = null;
+
+    async function openUserModal(uuid) {
+        currentUserUUID = uuid;
+        const modal = document.getElementById('userModal');
+        const detailsDiv = document.getElementById('userDetails');
+        const loadingDiv = document.getElementById('userLoading');
+
+        modal.classList.add('active');
+        detailsDiv.style.display = 'none';
+        loadingDiv.style.display = 'block';
+
+        try {
+            const response = await fetch(`?handler=ViewUser&uuid=${uuid}`);
+            const user = await response.json();
+
+            document.getElementById('detailUsername').textContent = user.username;
+            document.getElementById('detailEmail').textContent = user.email;
+            document.getElementById('detailUUID').textContent = user.uuid;
+            document.getElementById('detailRole').textContent = user.roles;
+
+            const statusText = user.isLocked ? 'Locked' : (user.isActive ? 'Active' : 'Inactive');
+            document.getElementById('detailStatus').textContent = statusText;
+            document.getElementById('detailLastActive').textContent = new Date(user.lastActive).toLocaleString();
+
+            populateActions(user);
+
+            loadingDiv.style.display = 'none';
+            detailsDiv.style.display = 'block';
+        } catch (error) {
+            showToast('Failed to load user details', 'error');
+            closeUserModal();
+        }
+    }
+
+    function closeUserModal() {
+        document.getElementById('userModal').classList.remove('active');
+        currentUserUUID = null;
+    }
+
+    function populateActions(user) {
+        const actions = document.getElementById('modalActions');
+        actions.innerHTML = '';
+
+        if (user.roles !== 'Admin') {
+            const banBtn = document.createElement('button');
+            banBtn.className = 'btn-modal btn-ban';
+            banBtn.textContent = user.roles === 'Banned' ? 'Unban User' : 'Ban User';
+            banBtn.onclick = () => user.roles === 'Banned' ? unbanUser(user.uuid) : banUser(user.uuid);
+            actions.appendChild(banBtn);
+        }
+
+        if (user.isLocked) {
+            const unlockBtn = document.createElement('button');
+            unlockBtn.className = 'btn-modal btn-lock';
+            unlockBtn.textContent = 'Unlock Account';
+            unlockBtn.onclick = () => unlockUser(user.uuid);
+            actions.appendChild(unlockBtn);
+        } else {
+            const lockBtn = document.createElement('button');
+            lockBtn.className = 'btn-modal btn-lock';
+            lockBtn.textContent = 'Lock Account';
+            lockBtn.onclick = () => lockUser(user.uuid);
+            actions.appendChild(lockBtn);
+        }
+
+        const resetBtn = document.createElement('button');
+        resetBtn.className = 'btn-modal btn-reset';
+        resetBtn.textContent = 'Reset Password';
+        resetBtn.onclick = () => resetPassword(user.uuid);
+        actions.appendChild(resetBtn);
+
+        if (user.twoFactorEnabled) {
+            const disable2faBtn = document.createElement('button');
+            disable2faBtn.className = 'btn-modal btn-reset';
+            disable2faBtn.textContent = 'Disable 2FA';
+            disable2faBtn.onclick = () => disable2FA(user.uuid);
+            actions.appendChild(disable2faBtn);
+        }
+
+        if (user.roles !== 'Admin') {
+            const deleteBtn = document.createElement('button');
+            deleteBtn.className = 'btn-modal btn-delete';
+            deleteBtn.textContent = 'Delete User';
+            deleteBtn.onclick = () => {
+                if (confirm(`Are you sure you want to delete ${user.username}? This cannot be undone.`)) {
+                    deleteUser(user.uuid);
+                }
+            };
+            actions.appendChild(deleteBtn);
+        }
+    }
+
+    async function banUser(uuid) {
+        if (!confirm('Are you sure you want to ban this user?')) return;
+        await performAction('BanUser', uuid, 'User banned successfully');
+    }
+
+    async function unbanUser(uuid) {
+        if (!confirm('Are you sure you want to unban this user?')) return;
+        await performAction('UnbanUser', uuid, 'User unbanned successfully');
+    }
+
+    async function lockUser(uuid) {
+        await performAction('LockUser', uuid, 'User account locked');
+    }
+
+    async function unlockUser(uuid) {
+        await performAction('UnlockUser', uuid, 'User account unlocked');
+    }
+
+    async function resetPassword(uuid) {
+        await performAction('ResetPassword', uuid, 'Password reset initiated');
+    }
+
+    async function disable2FA(uuid) {
+        if (!confirm('Disable 2FA for this user?')) return;
+        await performAction('Disable2FA', uuid, '2FA disabled successfully');
+    }
+
+    async function deleteUser(uuid) {
+        await performAction('DeleteUser', uuid, 'User deleted successfully', true);
+    }
+
+    async function performAction(handler, uuid, successMessage, closeModal = false) {
+        try {
+            const formData = new FormData();
+            formData.append('uuid', uuid);
+
+            const response = await fetch(`?handler=${handler}`, {
+                method: 'POST',
+                body: formData
+            });
+
+            if (!response.ok) {
+                throw new Error(`HTTP error! status: ${response.status}`);
+            }
+
+            const contentType = response.headers.get('content-type');
+            if (!contentType || !contentType.includes('application/json')) {
+                throw new Error('Invalid response content type');
+            }
+
+            const result = await response.json();
+
+            if (result.success) {
+                showToast(successMessage, 'success');
+                if (closeModal) {
+                    closeUserModal();
+                    location.reload();
+                } else {
+                    await openUserModal(uuid);
+                }
+            } else {
+                showToast(result.message || 'Action failed', 'error');
+            }
+        } catch (error) {
+            showToast('An error occurred: ' + error.message, 'error');
+            console.error(error);
+        }
+    }
+
+    function showToast(message, type = 'success') {
+        const toast = document.createElement('div');
+        toast.className = `toast ${type}`;
+        toast.textContent = message;
+        document.body.appendChild(toast);
+
+        setTimeout(() => {
+            toast.style.animation = 'slideOut 0.3s ease';
+            setTimeout(() => toast.remove(), 300);
+        }, 3000);
+    }
+
+    document.getElementById('userModal').addEventListener('click', (e) => {
+        if (e.target.id === 'userModal') closeUserModal();
+    });
+</script>

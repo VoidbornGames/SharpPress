@@ -1,35 +1,128 @@
 ﻿@page "/admin/settings"
+@model SharpPress.Pages.SettingsModel
 @{
     Layout = "_AdminLayout";
     ViewData["Title"] = "Settings";
+
+    var activeTab = ViewContext.RouteData.Values["tab"]?.ToString() ?? Model.ActiveTab;
 }
 
 <style>
+    .settings-container {
+        background: linear-gradient(145deg, rgba(30, 41, 59, 0.9), rgba(15, 23, 42, 0.6));
+        border: 1px solid rgba(255, 255, 255, 0.06);
+        border-radius: 16px;
+        overflow: hidden;
+        position: relative;
+    }
+
+        .settings-container::before {
+            content: '';
+            position: absolute;
+            top: 0;
+            left: 0;
+            right: 0;
+            height: 1px;
+            background: linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.08), transparent);
+            z-index: 1;
+        }
+
+    .settings-header {
+        padding: 1.25rem 1.75rem;
+        border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+        display: flex;
+        align-items: center;
+        gap: 10px;
+    }
+
+        .settings-header svg {
+            width: 18px;
+            height: 18px;
+            stroke: #818cf8;
+            fill: none;
+            stroke-width: 1.8;
+            stroke-linecap: round;
+            stroke-linejoin: round;
+        }
+
+    .settings-header-title {
+        font-size: 1.1rem;
+        font-weight: 600;
+        color: #f1f5f9;
+        letter-spacing: -0.2px;
+    }
+
+    .settings-body {
+        padding: 2rem 1.75rem;
+    }
+
+    .settings-success {
+        padding: 0.85rem 1.15rem;
+        border-radius: 10px;
+        border: 1px solid rgba(16, 185, 129, 0.2);
+        background: rgba(16, 185, 129, 0.08);
+        color: #34d399;
+        font-size: 0.875rem;
+        font-weight: 500;
+        margin-bottom: 1.5rem;
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        animation: successFadeIn 0.4s ease;
+    }
+
+        .settings-success svg {
+            width: 18px;
+            height: 18px;
+            stroke: #34d399;
+            fill: none;
+            stroke-width: 2;
+            stroke-linecap: round;
+            stroke-linejoin: round;
+            flex-shrink: 0;
+        }
+
+    @@keyframes successFadeIn {
+        from {
+            opacity: 0;
+            transform: translateY(-6px);
+        }
+
+        to {
+            opacity: 1;
+            transform: translateY(0);
+        }
+    }
+
     .settings-tabs {
         display: flex;
-        gap: 1rem;
+        gap: 0;
         margin-bottom: 2rem;
-        border-bottom: 1px solid var(--border-subtle);
+        border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+        position: relative;
     }
 
     .tab-btn {
         background: transparent;
         border: none;
-        color: var(--text-muted);
-        padding: 0.75rem 0;
-        font-size: 0.95rem;
+        color: rgba(148, 163, 184, 0.7);
+        padding: 0.75rem 1.25rem;
+        font-size: 0.9rem;
         font-weight: 500;
         cursor: pointer;
         position: relative;
-        transition: color 0.3s ease;
+        transition: color 0.25s ease;
+        display: flex;
+        align-items: center;
+        gap: 8px;
     }
 
         .tab-btn:hover {
-            color: var(--text-white);
+            color: #e2e8f0;
         }
 
         .tab-btn.active {
-            color: var(--primary);
+            color: #818cf8;
         }
 
             .tab-btn.active::after {
@@ -39,15 +132,46 @@
                 left: 0;
                 width: 100%;
                 height: 2px;
-                background-color: var(--primary);
-                box-shadow: 0 0 10px var(--primary-glow);
+                background: linear-gradient(90deg, #6366f1, #818cf8);
+                box-shadow: 0 0 12px rgba(99, 102, 241, 0.3);
+                border-radius: 2px 2px 0 0;
             }
 
-    /* Form Grid Layout */
+        .tab-btn svg {
+            width: 16px;
+            height: 16px;
+            stroke: currentColor;
+            fill: none;
+            stroke-width: 1.8;
+            stroke-linecap: round;
+            stroke-linejoin: round;
+        }
+
+    .tab-content {
+        display: none;
+    }
+
+        .tab-content.active {
+            display: block;
+            animation: tabFadeIn 0.3s ease;
+        }
+
+    @@keyframes tabFadeIn {
+        from {
+            opacity: 0;
+            transform: translateY(4px);
+        }
+
+        to {
+            opacity: 1;
+            transform: translateY(0);
+        }
+    }
+
     .settings-grid {
         display: grid;
         grid-template-columns: 1fr 1fr;
-        gap: 2rem;
+        gap: 1.5rem;
     }
 
     .full-width {
@@ -55,32 +179,77 @@
     }
 
     .form-group {
-        margin-bottom: 1.5rem;
+        margin-bottom: 0;
+        display: flex;
+        flex-direction: column;
+        gap: 6px;
     }
 
     .form-label {
-        display: block;
-        margin-bottom: 0.5rem;
-        color: var(--text-muted);
-        font-size: 0.85rem;
-        font-weight: 500;
+        color: rgba(148, 163, 184, 0.8);
+        font-size: 0.8rem;
+        font-weight: 600;
+        text-transform: uppercase;
+        letter-spacing: 0.8px;
     }
 
     .settings-input {
         width: 100%;
+        padding: 0.7rem 1rem;
+        background: rgba(11, 17, 32, 0.6) !important;
+        border: 1px solid rgba(255, 255, 255, 0.08) !important;
+        border-radius: 10px;
+        color: #e2e8f0 !important;
+        font-size: 0.9rem;
+        outline: none;
+        transition: all 0.25s ease;
+        font-family: inherit;
     }
 
-        .settings-input:focus {
-            border-color: var(--primary);
-            box-shadow: 0 0 0 3px rgba(79, 70, 229, 0.15);
+        .settings-input::placeholder {
+            color: rgba(148, 163, 184, 0.3);
         }
+
+        .settings-input:focus {
+            border-color: rgba(99, 102, 241, 0.5) !important;
+            box-shadow: 0 0 0 3px rgba(99, 102, 241, 0.1);
+            background: rgba(11, 17, 32, 0.8) !important;
+        }
+
+    select.settings-input {
+        cursor: pointer;
+        appearance: none;
+        background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='16' height='16' viewBox='0 0 24 24' fill='none' stroke='%2394a3b8' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpolyline points='6 9 12 15 18 9'%3E%3C/polyline%3E%3C/svg%3E");
+        background-repeat: no-repeat;
+        background-position: right 12px center;
+        padding-right: 36px;
+    }
+
+        select.settings-input option {
+            background: #1e293b;
+            color: #e2e8f0;
+        }
+
+    textarea.settings-input {
+        resize: vertical;
+        min-height: 120px;
+        font-family: 'JetBrains Mono', 'Fira Code', 'SF Mono', monospace;
+        font-size: 0.82rem;
+        line-height: 1.6;
+    }
+
+    .toggle-list {
+        display: flex;
+        flex-direction: column;
+    }
 
     .toggle-row {
         display: flex;
         justify-content: space-between;
         align-items: center;
-        padding: 1rem 0;
-        border-bottom: 1px solid var(--border-subtle);
+        padding: 1.1rem 0;
+        border-bottom: 1px solid rgba(255, 255, 255, 0.04);
+        gap: 1.5rem;
     }
 
         .toggle-row:last-child {
@@ -88,15 +257,17 @@
         }
 
     .toggle-info h4 {
-        color: var(--text-white);
-        font-size: 0.95rem;
+        color: #f1f5f9;
+        font-size: 0.9rem;
         font-weight: 600;
-        margin-bottom: 0.25rem;
+        margin-bottom: 3px;
+        letter-spacing: -0.1px;
     }
 
     .toggle-info p {
-        color: var(--text-muted);
-        font-size: 0.8rem;
+        color: rgba(148, 163, 184, 0.6);
+        font-size: 0.78rem;
+        line-height: 1.4;
     }
 
     .switch {
@@ -104,6 +275,7 @@
         display: inline-block;
         width: 44px;
         height: 24px;
+        flex-shrink: 0;
     }
 
         .switch input {
@@ -119,9 +291,9 @@
         left: 0;
         right: 0;
         bottom: 0;
-        background-color: var(--bg-input);
-        border: 1px solid var(--border-subtle);
-        transition: .4s;
+        background: rgba(11, 17, 32, 0.6);
+        border: 1px solid rgba(255, 255, 255, 0.08);
+        transition: 0.3s cubic-bezier(0.4, 0, 0.2, 1);
         border-radius: 34px;
     }
 
@@ -132,84 +304,98 @@
             width: 16px;
             left: 3px;
             bottom: 3px;
-            background-color: var(--text-muted);
-            transition: .4s;
+            background: rgba(148, 163, 184, 0.6);
+            transition: 0.3s cubic-bezier(0.4, 0, 0.2, 1);
             border-radius: 50%;
         }
 
     input:checked + .slider {
-        background-color: var(--primary);
-        border-color: var(--primary);
+        background: linear-gradient(135deg, #4f46e5, #6366f1);
+        border-color: transparent;
+        box-shadow: 0 0 16px rgba(99, 102, 241, 0.25);
     }
 
         input:checked + .slider:before {
             transform: translateX(20px);
-            background-color: white;
+            background: white;
+            box-shadow: 0 1px 4px rgba(0, 0, 0, 0.2);
+        }
+
+    .info-banner {
+        padding: 0.85rem 1.15rem;
+        border-radius: 10px;
+        border: 1px solid rgba(99, 102, 241, 0.15);
+        background: rgba(99, 102, 241, 0.06);
+        margin-bottom: 1.5rem;
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        font-size: 0.82rem;
+        color: rgba(148, 163, 184, 0.8);
+    }
+
+        .info-banner svg {
+            width: 16px;
+            height: 16px;
+            stroke: #818cf8;
+            fill: none;
+            stroke-width: 1.8;
+            stroke-linecap: round;
+            stroke-linejoin: round;
+            flex-shrink: 0;
         }
 
     .action-bar {
         margin-top: 2rem;
         padding-top: 1.5rem;
-        border-top: 1px solid var(--border-subtle);
+        border-top: 1px solid rgba(255, 255, 255, 0.06);
         display: flex;
         justify-content: flex-end;
-        gap: 1rem;
+        gap: 0.75rem;
     }
 
     .btn {
-        padding: 0.75rem 1.5rem;
-        border-radius: var(--radius-md);
-        font-weight: 500;
+        padding: 0.7rem 1.5rem;
+        border-radius: 10px;
+        font-weight: 600;
         cursor: pointer;
         border: none;
-        transition: all 0.2s;
-        font-size: 0.9rem;
+        transition: all 0.25s ease;
+        font-size: 0.875rem;
         display: inline-flex;
         align-items: center;
         gap: 8px;
+        font-family: inherit;
     }
 
     .btn-secondary {
-        background: rgba(255, 255, 255, 0.05);
-        color: var(--text-main);
-        border: 1px solid var(--border-subtle);
+        background: rgba(255, 255, 255, 0.04);
+        color: rgba(226, 232, 240, 0.7);
+        border: 1px solid rgba(255, 255, 255, 0.08);
     }
 
         .btn-secondary:hover {
-            background: rgba(255, 255, 255, 0.1);
+            background: rgba(255, 255, 255, 0.08);
+            color: #e2e8f0;
         }
 
     .btn-primary {
-        background: var(--primary);
+        background: linear-gradient(135deg, #4f46e5, #6366f1);
         color: white;
-        box-shadow: 0 4px 12px var(--primary-glow);
+        box-shadow: 0 4px 16px rgba(99, 102, 241, 0.25);
     }
 
         .btn-primary:hover {
-            background: var(--primary-hover);
+            background: linear-gradient(135deg, #4338ca, #4f46e5);
+            box-shadow: 0 6px 24px rgba(99, 102, 241, 0.35);
+            transform: translateY(-1px);
         }
 
-    .btn-spinner {
-        border: 2px solid rgba(255,255,255,0.3);
-        border-radius: 50%;
-        border-top: 2px solid #fff;
-        width: 14px;
-        height: 14px;
-        animation: spin 1s linear infinite;
-        display: none;
-    }
-
-    keyframes spin {
-        0% {
-            transform: rotate(0deg);
+        .btn-primary:active {
+            transform: translateY(0);
         }
 
-        100% {
-            transform: rotate(360deg);
-        }
-    }
-
-    media (max-width: 768px) {
+    @@media (max-width: 768px) {
         .settings-grid {
             grid-template-columns: 1fr;
         }
@@ -217,269 +403,169 @@
         .full-width {
             grid-column: span 1;
         }
+
+        .settings-body {
+            padding: 1.5rem 1.25rem;
+        }
     }
 </style>
 
-<div class="card">
-    <div class="card-header">
-        <div class="card-title">System Configuration</div>
+<div class="settings-container">
+    <div class="settings-header">
+        <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3" /><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z" /></svg>
+        <span class="settings-header-title">System Configuration</span>
     </div>
 
-    <div class="card-body" style="padding: 2rem;">
-        <div id="save-alert" class="alert alert-success" style="display: none; border-left: 4px solid var(--success); background: rgba(16, 185, 129, 0.1); color: var(--success);">
-            <i class="fas fa-check-circle"></i> Settings updated successfully.
-        </div>
+    <div class="settings-body">
+        @if (TempData["SuccessMessage"] != null)
+        {
+            <div class="settings-success">
+                <svg viewBox="0 0 24 24"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14" /><polyline points="22 4 12 14.01 9 11.01" /></svg>
+                @TempData["SuccessMessage"]
+            </div>
+        }
 
         <div class="settings-tabs">
-            <button class="tab-btn active" onclick="switchTab('general')">General</button>
-            <button class="tab-btn" onclick="switchTab('security')">Security</button>
-            <button class="tab-btn" onclick="switchTab('advanced')">Advanced</button>
+            <button type="button" class="tab-btn @(activeTab == "general" ? "active" : "")" data-tab="general">
+                <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="10" /><line x1="2" y1="12" x2="22" y2="12" /><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z" /></svg>
+                General
+            </button>
+            <button type="button" class="tab-btn @(activeTab == "security" ? "active" : "")" data-tab="security">
+                <svg viewBox="0 0 24 24"><rect x="3" y="11" width="18" height="11" rx="2" ry="2" /><path d="M7 11V7a5 5 0 0 1 10 0v4" /></svg>
+                Security
+            </button>
+            <button type="button" class="tab-btn @(activeTab == "advanced" ? "active" : "")" data-tab="advanced">
+                <svg viewBox="0 0 24 24"><polyline points="16 18 22 12 16 6" /><polyline points="8 6 2 12 8 18" /></svg>
+                Advanced
+            </button>
         </div>
 
-        <form id="settings-form" onsubmit="handleSave(event)">
+        <form method="post">
+            <input type="hidden" name="activeTab" id="activeTabInput" value="@activeTab" />
+            @Html.AntiForgeryToken()
 
-            <div id="tab-general" class="tab-content">
+            <div id="tab-general" class="tab-content @(activeTab == "general" ? "active" : "")">
                 <div class="settings-grid">
                     <div class="form-group full-width">
                         <label class="form-label">Site Name</label>
-                        <input type="text" id="siteName" class="form-input settings-input" placeholder="My Awesome Site">
+                        <input type="text" asp-for="Input.SiteName" class="settings-input" placeholder="My Awesome Site">
                     </div>
-
                     <div class="form-group full-width">
                         <label class="form-label">Site Description</label>
-                        <input type="text" id="siteDesc" class="form-input settings-input" placeholder="A brief description of your site">
+                        <input type="text" asp-for="Input.SiteDescription" class="settings-input" placeholder="A brief description of your site">
                     </div>
-
                     <div class="form-group">
                         <label class="form-label">Admin Email</label>
-                        <input type="email" id="adminEmail" class="form-input settings-input" placeholder="admin@example.com">
+                        <input type="email" asp-for="Input.AdminEmail" class="settings-input" placeholder="admin@example.com">
                     </div>
-
                     <div class="form-group">
                         <label class="form-label">Timezone</label>
-                        <select id="timezone" class="form-input settings-input">
+                        <select asp-for="Input.Timezone" class="settings-input">
                             <option value="UTC">UTC (Coordinated Universal Time)</option>
                             <option value="EST">EST (Eastern Standard Time)</option>
                             <option value="PST">PST (Pacific Standard Time)</option>
                         </select>
                     </div>
-
                     <div class="form-group full-width">
                         <label class="form-label">Footer Text</label>
-                        <input type="text" id="footerText" class="form-input settings-input" placeholder="© 2023 My Company">
+                        <input type="text" asp-for="Input.FooterText" class="settings-input" placeholder="© 2025 My Company">
                     </div>
                 </div>
             </div>
 
-            <div id="tab-security" class="tab-content" style="display: none;">
-                <div class="toggle-row">
-                    <div class="toggle-info">
-                        <h4>Force HTTPS</h4>
-                        <p>Automatically redirect all HTTP traffic to HTTPS.</p>
+            <div id="tab-security" class="tab-content @(activeTab == "security" ? "active" : "")">
+                <div class="toggle-list">
+                    <div class="toggle-row">
+                        <div class="toggle-info">
+                            <h4>Force HTTPS</h4>
+                            <p>Automatically redirect all HTTP traffic to HTTPS.</p>
+                        </div>
+                        <label class="switch">
+                            <input type="checkbox" asp-for="Input.ForceHttps">
+                            <span class="slider"></span>
+                        </label>
                     </div>
-                    <label class="switch">
-                        <input type="checkbox" id="forceHttps">
-                        <span class="slider"></span>
-                    </label>
-                </div>
-
-                <div class="toggle-row">
-                    <div class="toggle-info">
-                        <h4>Allow Registration</h4>
-                        <p>Allow new users to create public accounts.</p>
+                    <div class="toggle-row">
+                        <div class="toggle-info">
+                            <h4>Allow Registration</h4>
+                            <p>Allow new users to create public accounts.</p>
+                        </div>
+                        <label class="switch">
+                            <input type="checkbox" asp-for="Input.AllowRegistration">
+                            <span class="slider"></span>
+                        </label>
                     </div>
-                    <label class="switch">
-                        <input type="checkbox" id="allowRegistration">
-                        <span class="slider"></span>
-                    </label>
-                </div>
-
-                <div class="toggle-row">
-                    <div class="toggle-info">
-                        <h4>Two-Factor Auth (Admin)</h4>
-                        <p>Require 2FA for all administrator accounts.</p>
+                    <div class="toggle-row">
+                        <div class="toggle-info">
+                            <h4>Two-Factor Auth (Admin)</h4>
+                            <p>Require 2FA for all administrator accounts.</p>
+                        </div>
+                        <label class="switch">
+                            <input type="checkbox" asp-for="Input.Require2FA">
+                            <span class="slider"></span>
+                        </label>
                     </div>
-                    <label class="switch">
-                        <input type="checkbox" id="require2FA">
-                        <span class="slider"></span>
-                    </label>
                 </div>
-
-                <div class="settings-grid" style="margin-top: 2rem;">
+                <div class="settings-grid" style="margin-top: 1.5rem;">
                     <div class="form-group">
                         <label class="form-label">Session Timeout (Minutes)</label>
-                        <input type="number" id="sessionTimeout" class="form-input settings-input" value="60">
+                        <input type="number" asp-for="Input.SessionTimeout" class="settings-input">
                     </div>
                 </div>
             </div>
 
-            <div id="tab-advanced" class="tab-content" style="display: none;">
-                <div class="alert alert-info" style="margin-bottom: 1.5rem;">
-                    <i class="fas fa-info-circle"></i>
-                    <span>These settings affect system performance and caching.</span>
+            <div id="tab-advanced" class="tab-content @(activeTab == "advanced" ? "active" : "")">
+                <div class="info-banner">
+                    <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="10" /><line x1="12" y1="16" x2="12" y2="12" /><line x1="12" y1="8" x2="12.01" y2="8" /></svg>
+                    These settings affect system performance and caching.
                 </div>
-
-                <div class="toggle-row">
-                    <div class="toggle-info">
-                        <h4>Enable Caching</h4>
-                        <p>Cache static assets and database queries.</p>
+                <div class="toggle-list">
+                    <div class="toggle-row">
+                        <div class="toggle-info">
+                            <h4>Enable Caching</h4>
+                            <p>Cache static assets and database queries.</p>
+                        </div>
+                        <label class="switch">
+                            <input type="checkbox" asp-for="Input.EnableCache">
+                            <span class="slider"></span>
+                        </label>
                     </div>
-                    <label class="switch">
-                        <input type="checkbox" id="enableCache" checked>
-                        <span class="slider"></span>
-                    </label>
-                </div>
-
-                <div class="toggle-row">
-                    <div class="toggle-info">
-                        <h4>Maintenance Mode</h4>
-                        <p>Take the site offline for non-administrators.</p>
+                    <div class="toggle-row">
+                        <div class="toggle-info">
+                            <h4>Maintenance Mode</h4>
+                            <p>Take the site offline for non-administrators.</p>
+                        </div>
+                        <label class="switch">
+                            <input type="checkbox" asp-for="Input.MaintenanceMode">
+                            <span class="slider"></span>
+                        </label>
                     </div>
-                    <label class="switch">
-                        <input type="checkbox" id="maintenanceMode">
-                        <span class="slider"></span>
-                    </label>
                 </div>
-
-                <div class="settings-grid" style="margin-top: 2rem;">
+                <div class="settings-grid" style="margin-top: 1.5rem;">
                     <div class="form-group full-width">
                         <label class="form-label">Custom CSS (Injected in &lt;head&gt;)</label>
-                        <textarea id="customCss" class="form-input settings-input" rows="6" style="font-family: monospace;"></textarea>
+                        <textarea asp-for="Input.CustomCss" class="settings-input" rows="6"></textarea>
                     </div>
                 </div>
             </div>
 
             <div class="action-bar">
-                <button type="button" class="btn btn-secondary">Cancel</button>
-                <button type="submit" class="btn btn-primary" id="saveBtn">
-                    <span>Save Changes</span>
-                    <div class="btn-spinner" id="btnSpinner"></div>
-                </button>
+                <a href="/admin" class="btn btn-secondary">Cancel</a>
+                <button type="submit" class="btn btn-primary">Save Changes</button>
             </div>
         </form>
     </div>
 </div>
 
-@section Scripts {
-    <script>
-        function switchTab(tabName) {
-            document.querySelectorAll('.tab-content').forEach(el => el.style.display = 'none');
-            document.querySelectorAll('.tab-btn').forEach(btn => btn.classList.remove('active'));
-            document.getElementById(`tab-${tabName}`).style.display = 'block';
-
-            const btns = Array.from(document.querySelectorAll('.tab-btn'));
-            const activeBtn = btns.find(b => b.getAttribute('onclick').includes(tabName));
-            if (activeBtn) activeBtn.classList.add('active');
-        }
-
-        async function fetchSettings() {
-            try {
-                const response = await apiRequest('/api/settings', { method: 'GET' });
-
-                if (!response.ok) {
-                    throw new Error('Failed to fetch settings');
-                }
-
-                const data = await response.json();
-
-                const setVal = (id, val) => {
-                    const el = document.getElementById(id);
-                    if (el) el.value = val;
-                };
-
-                const setCheck = (id, val) => {
-                    const el = document.getElementById(id);
-                    if (el) el.checked = val;
-                };
-
-                if(data.general) {
-                    setVal("siteName", data.general.siteName);
-                    setVal("siteDesc", data.general.siteDescription);
-                    setVal("adminEmail", data.general.adminEmail);
-                    setVal("timezone", data.general.timezone);
-                    setVal("footerText", data.general.footerText);
-                }
-
-                if(data.security) {
-                    setCheck("forceHttps", data.security.forceHttps);
-                    setCheck("allowRegistration", data.security.allowRegistration);
-                    setCheck("require2FA", data.security.require2FA);
-                    setVal("sessionTimeout", data.security.sessionTimeout);
-                }
-
-                if(data.advanced) {
-                    setCheck("enableCache", data.advanced.enableCache);
-                    setCheck("maintenanceMode", data.advanced.maintenanceMode);
-                    setVal("customCss", data.advanced.customCss);
-                }
-
-            } catch (error) {
-                console.error('Error loading settings:', error);
-            }
-        }
-
-        async function handleSave(event) {
-            event.preventDefault();
-
-            const saveBtn = document.getElementById('saveBtn');
-            const btnSpinner = document.getElementById('btnSpinner');
-            const alertBox = document.getElementById('save-alert');
-            const btnText = saveBtn.querySelector('span');
-
-            saveBtn.disabled = true;
-            btnSpinner.style.display = 'block';
-            btnText.textContent = 'Saving...';
-            alertBox.style.display = 'none';
-
-            const payload = {
-                general: {
-                    siteName: document.getElementById('siteName').value,
-                    siteDescription: document.getElementById('siteDesc').value,
-                    adminEmail: document.getElementById('adminEmail').value,
-                    timezone: document.getElementById('timezone').value,
-                    footerText: document.getElementById('footerText').value
-                },
-                security: {
-                    forceHttps: document.getElementById('forceHttps').checked,
-                    allowRegistration: document.getElementById('allowRegistration').checked,
-                    require2FA: document.getElementById('require2FA').checked,
-                    sessionTimeout: parseInt(document.getElementById('sessionTimeout').value)
-                },
-                advanced: {
-                    enableCache: document.getElementById('enableCache').checked,
-                    maintenanceMode: document.getElementById('maintenanceMode').checked,
-                    customCss: document.getElementById('customCss').value
-                }
-            };
-
-            try {
-                const response = await apiRequest('/api/settings', {
-                    method: 'POST',
-                    body: JSON.stringify(payload)
-                });
-
-                if (response.ok) {
-                    alertBox.style.display = 'flex';
-                    setTimeout(() => {
-                        alertBox.style.display = 'none';
-                    }, 3000);
-                } else {
-                    console.error('Save failed');
-                    alert('Failed to save settings. Please check console.');
-                }
-
-            } catch (error) {
-                console.error('Error saving settings:', error);
-            } finally {
-                saveBtn.disabled = false;
-                btnSpinner.style.display = 'none';
-                btnText.textContent = 'Save Changes';
-            }
-        }
-
-        document.addEventListener('DOMContentLoaded', () => {
-            fetchSettings();
-            Delau
+<script>
+    document.querySelectorAll('.tab-btn').forEach(function(btn) {
+        btn.addEventListener('click', function() {
+            var tab = this.getAttribute('data-tab');
+            document.getElementById('activeTabInput').value = tab;
+            document.querySelectorAll('.tab-btn').forEach(function(b) { b.classList.remove('active'); });
+            document.querySelectorAll('.tab-content').forEach(function(c) { c.classList.remove('active'); });
+            this.classList.add('active');
+            document.getElementById('tab-' + tab).classList.add('active');
         });
-    </script>
-}
+    });
+</script>

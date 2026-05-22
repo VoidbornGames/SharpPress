@@ -4,13 +4,13 @@ using SharpPress.Models;
 
 namespace SharpPress.Services
 {
-    public class VideoService
+    public class VideoStreamingService
     {
         private readonly string _videosFolder;
         private readonly Logger _logger;
         private readonly IEventBus _eventBus;
 
-        public VideoService(
+        public VideoStreamingService(
             FilePaths filePaths,
             Logger logger,
             IEventBus eventBus)
@@ -111,8 +111,8 @@ namespace SharpPress.Services
 
                     if (totalBytes > 0 && downloadedBytes % (1024 * 1024) == 0)
                     {
-                        double progress = (double)downloadedBytes / totalBytes * 100;
-                        _logger.Log($"📥 Download progress: {progress:F1}%");
+                        //double progress = (double)downloadedBytes / totalBytes * 100;
+                        //_logger.Log($"📥 Download progress: {progress:F1}%");
                     }
                 }
 

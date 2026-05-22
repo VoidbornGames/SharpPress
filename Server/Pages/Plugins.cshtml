@@ -1,37 +1,360 @@
 ﻿@page "/admin/plugins"
-@inject SharpPress.Services.PluginManager _pluginManager
-
+@model SharpPress.Pages.PluginsModel
+@inject SharpPress.Services.PluginManager pluginManager
 @{
     Layout = "_AdminLayout";
     ViewData["Title"] = "Plugins";
 }
 
-<div class="card">
-    <div class="card-header">
-        <div class="card-title">Plugin Management</div>
-    </div>
-    <div class="alert alert-info">
-        Manage, upload, and configure your extensions here.
-    </div>
-    <div class="table-container">
-        <table>
-            <thead>
-                <tr>
-                    <th>Name</th>
-                    <th>Version</th>
-                    <th>Status</th>
-                </tr>
-            </thead>
-            <tbody>
-                @foreach (var p in _pluginManager.GetLoadedPlugins())
-                {
-                    <tr>
-                        <td>@p.Value.Name</td>
-                        <td>@p.Value.Version</td>
-                        <td><span class="badge badge-success">Active</span></td>
-                    </tr>
-                }
-            </tbody>
-        </table>
+<style>
+    .plugins-header {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        margin-bottom: 2rem;
+    }
+
+    .plugins-grid {
+        display: grid;
+        grid-template-columns: repeat(auto-fill, minmax(350px, 1fr));
+        gap: 1.5rem;
+        margin-top: 2rem;
+    }
+
+    .plugin-card {
+        background: linear-gradient(135deg, var(--bg-card), rgba(255, 255, 255, 0.03));
+        border: 1px solid var(--border-subtle);
+        border-radius: var(--radius-lg);
+        padding: 1.75rem;
+        transition: all 0.3s ease;
+        display: flex;
+        flex-direction: column;
+        height: 100%;
+        position: relative;
+        overflow: hidden;
+    }
+
+        .plugin-card::before {
+            content: '';
+            position: absolute;
+            top: 0;
+            left: 0;
+            right: 0;
+            height: 3px;
+            background: linear-gradient(90deg, var(--primary), var(--accent));
+            opacity: 0;
+            transition: opacity 0.3s ease;
+        }
+
+        .plugin-card:hover {
+            transform: translateY(-4px);
+            border-color: var(--primary);
+            box-shadow: 0 12px 40px rgba(79, 70, 229, 0.15);
+        }
+
+            .plugin-card:hover::before {
+                opacity: 1;
+            }
+
+    .plugin-header {
+        display: flex;
+        justify-content: space-between;
+        align-items: flex-start;
+        margin-bottom: 1rem;
+    }
+
+    .plugin-icon {
+        width: 48px;
+        height: 48px;
+        background: linear-gradient(135deg, var(--primary), var(--accent));
+        border-radius: var(--radius-md);
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        font-weight: 700;
+        color: white;
+        font-size: 1.5rem;
+    }
+
+    .plugin-name {
+        font-size: 1.25rem;
+        font-weight: 700;
+        color: var(--text-white);
+        margin-bottom: 0.25rem;
+        letter-spacing: -0.3px;
+    }
+
+    .plugin-version {
+        font-size: 0.85rem;
+        color: var(--text-muted);
+    }
+
+    .plugin-status {
+        display: flex;
+        align-items: center;
+        gap: 0.5rem;
+        font-size: 0.85rem;
+    }
+
+        .plugin-status::before {
+            content: '';
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+            background: var(--success);
+            transition: background 0.3s ease;
+        }
+
+    .plugin-card.disabled .plugin-status::before {
+        background: var(--text-muted);
+    }
+
+    .plugin-description {
+        font-size: 0.9rem;
+        color: var(--text-muted);
+        margin-bottom: 1.5rem;
+        flex-grow: 1;
+        line-height: 1.5;
+    }
+
+    .plugin-footer {
+        display: flex;
+        gap: 0.75rem;
+        border-top: 1px solid var(--border-subtle);
+        padding-top: 1rem;
+        margin-top: 1rem;
+    }
+
+    .plugin-actions {
+        display: flex;
+        gap: 0.75rem;
+        width: 100%;
+    }
+
+    .btn-plugin {
+        flex: 1;
+        padding: 0.75rem 1rem;
+        border: none;
+        border-radius: var(--radius-md);
+        font-size: 0.85rem;
+        font-weight: 600;
+        cursor: pointer;
+        transition: all 0.2s ease;
+        text-align: center;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        gap: 0.5rem;
+        min-height: 40px;
+        text-decoration: none;
+    }
+
+    .btn-enable {
+        background: linear-gradient(135deg, var(--success), #059669);
+        color: white;
+        border: 1px solid rgba(16, 185, 129, 0.3);
+    }
+
+        .btn-enable:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 4px 12px rgba(16, 185, 129, 0.3);
+        }
+
+    .btn-disable {
+        background: linear-gradient(135deg, rgba(239, 68, 68, 0.15), rgba(239, 68, 68, 0.1));
+        color: var(--danger);
+        border: 1px solid rgba(239, 68, 68, 0.3);
+    }
+
+        .btn-disable:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 4px 12px rgba(239, 68, 68, 0.15);
+            background: linear-gradient(135deg, rgba(239, 68, 68, 0.2), rgba(239, 68, 68, 0.15));
+        }
+
+    .plugin-meta {
+        display: flex;
+        gap: 1rem;
+        font-size: 0.8rem;
+        color: var(--text-muted);
+        margin-top: 1rem;
+        padding-top: 1rem;
+        border-top: 1px solid var(--border-subtle);
+    }
+
+    .meta-item {
+        display: flex;
+        align-items: center;
+        gap: 0.4rem;
+    }
+
+    .plugin-card.disabled {
+        opacity: 0.7;
+    }
+
+        .plugin-card.disabled .plugin-name {
+            color: var(--text-muted);
+        }
+
+    .empty-state {
+        text-align: center;
+        padding: 4rem 2rem;
+        color: var(--text-muted);
+    }
+
+    .empty-state-icon {
+        font-size: 4rem;
+        margin-bottom: 1rem;
+        opacity: 0.5;
+    }
+
+    .empty-state-title {
+        font-size: 1.25rem;
+        color: var(--text-white);
+        margin-bottom: 0.5rem;
+        font-weight: 600;
+    }
+
+    .empty-state-text {
+        font-size: 0.95rem;
+    }
+
+    .stats-row {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+        gap: 1rem;
+        margin-bottom: 2rem;
+    }
+
+    .stat-mini {
+        background: rgba(255, 255, 255, 0.03);
+        border: 1px solid var(--border-subtle);
+        border-radius: var(--radius-md);
+        padding: 1rem;
+        text-align: center;
+        transition: all 0.2s ease;
+    }
+
+        .stat-mini:hover {
+            border-color: var(--primary);
+            background: rgba(79, 70, 229, 0.05);
+        }
+
+    .stat-number {
+        font-size: 1.75rem;
+        font-weight: 700;
+        color: var(--primary);
+    }
+
+    .stat-label {
+        font-size: 0.85rem;
+        color: var(--text-muted);
+        margin-top: 0.5rem;
+        text-transform: uppercase;
+        letter-spacing: 0.5px;
+    }
+</style>
+
+<div class="plugins-header">
+    <div>
+        <h1 style="font-size: 1.5rem; font-weight: 700; margin-bottom: 0.5rem;">Plugin Management</h1>
+        <p style="color: var(--text-muted); font-size: 0.95rem;">Manage and control your installed plugins</p>
     </div>
 </div>
+
+@if (pluginManager.GetLoadedPlugins().Count > 0)
+{
+    <div class="stats-row">
+        <div class="stat-mini">
+            <div class="stat-number">@pluginManager.GetLoadedPlugins().Count</div>
+            <div class="stat-label">Total Plugins</div>
+        </div>
+        <div class="stat-mini">
+            <div class="stat-number">@pluginManager.GetEnabledPlugins().Count</div>
+            <div class="stat-label">Active</div>
+        </div>
+        <div class="stat-mini">
+            <div class="stat-number">@(pluginManager.GetLoadedPlugins().Count - pluginManager.GetEnabledPlugins().Count)</div>
+            <div class="stat-label">Disabled</div>
+        </div>
+    </div>
+
+    <div class="plugins-grid">
+        @foreach (var p in pluginManager.GetLoadedPlugins())
+        {
+            var isEnabled = pluginManager.IsPluginEnabled(p.Value.Name);
+            var statusClass = isEnabled ? "" : "disabled";
+            var firstLetter = p.Value.Name.FirstOrDefault().ToString().ToUpper();
+
+            <div class="plugin-card @statusClass">
+                <div class="plugin-header">
+                    <div style="flex: 1;">
+                        <div class="plugin-name">@p.Value.Name</div>
+                        <div class="plugin-version">v@(p.Value.Version)</div>
+                    </div>
+                    <div class="plugin-icon">@firstLetter</div>
+                </div>
+
+                <div class="plugin-description">
+                    @(string.IsNullOrEmpty(p.Value.Description) ? "No description provided" : p.Value.Description)
+                </div>
+
+                <div class="plugin-status">
+                    @if (isEnabled)
+                    {
+                        <span style="color: var(--success);">Active</span>
+                    }
+                    else
+                    {
+                        <span style="color: var(--text-muted);">Disabled</span>
+                    }
+                </div>
+
+                <div class="plugin-footer">
+                    <div class="plugin-actions">
+                        @if (isEnabled)
+                        {
+                            <form method="post" asp-page-handler="Disable" style="flex: 1;">
+                                <input name="name" value="@p.Value.Name" hidden />
+                                <button class="btn-plugin btn-disable" type="submit">
+                                    <svg viewBox="0 0 24 24" style="width: 16px; height: 16px; stroke: currentColor; fill: none; stroke-width: 2;"><circle cx="12" cy="12" r="10" /><line x1="15" y1="9" x2="9" y2="15" /><line x1="9" y1="9" x2="15" y2="15" /></svg>
+                                    Disable
+                                </button>
+                            </form>
+                        }
+                        else
+                        {
+                            <form method="post" asp-page-handler="Enable" style="flex: 1;">
+                                <input name="name" value="@p.Value.Name" hidden />
+                                <button class="btn-plugin btn-enable" type="submit">
+                                    <svg viewBox="0 0 24 24" style="width: 16px; height: 16px; stroke: currentColor; fill: none; stroke-width: 2;"><polyline points="20 6 9 17 4 12" /></svg>
+                                    Enable
+                                </button>
+                            </form>
+                        }
+                    </div>
+                </div>
+
+                <div class="plugin-meta">
+                    <div class="meta-item">
+                        <svg viewBox="0 0 24 24" style="width: 14px; height: 14px; stroke: currentColor; fill: none; stroke-width: 1.5;"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2" /><circle cx="12" cy="7" r="4" /></svg>
+                        Author
+                    </div>
+                    <div class="meta-item" title="@p.Value.Author">
+                        @(p.Value.Author ?? "Unknown")
+                    </div>
+                </div>
+            </div>
+        }
+    </div>
+}
+else
+{
+    <div class="card">
+        <div class="empty-state">
+            <div class="empty-state-icon">📦</div>
+            <div class="empty-state-title">No Plugins Installed</div>
+            <div class="empty-state-text">Place your plugin DLL files in the plugins directory to get started</div>
+        </div>
+    </div>
+}

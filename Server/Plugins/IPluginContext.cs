@@ -9,6 +9,10 @@ namespace SharpPress.Plugins
     public interface IPluginContext
     {
         Logger Logger { get; }
+
+        /// <summary>
+        /// Service provider to get access to core services.
+        /// </summary>
         IServiceProvider ServiceProvider { get; }
 
         /// <summary>
@@ -16,7 +20,10 @@ namespace SharpPress.Plugins
         /// </summary>
         IServiceScopeFactory ScopeFactory { get; }
 
-        // --- Minimal API Integration ---
+        /// <summary>
+        /// Adds an button to the admin sidebar menu.
+        /// </summary>
+        void RegisterAdminMenuItem(string name, string iconSvg, string url, int order = 0);
 
         /// <summary>
         /// Maps a GET route. 

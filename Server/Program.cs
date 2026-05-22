@@ -1,58 +1,182 @@
-﻿using SharpPress.Events;
+﻿using Microsoft.AspNetCore.Authentication.JwtBearer;
+using Microsoft.AspNetCore.HttpOverrides;
+using Microsoft.AspNetCore.Mvc.ApplicationParts;
+using Microsoft.AspNetCore.Mvc.Razor;
+using Microsoft.IdentityModel.Tokens;
+using SharpPress.Events;
 using SharpPress.Helpers;
+using SharpPress.Middlewares;
 using SharpPress.Models;
+using SharpPress.Plugins;
 using SharpPress.Servers;
 using SharpPress.Services;
+using System.Text;
 
 namespace SharpPress
 {
-    class Program
+    public class Program
     {
         private static int httpPort = 12001;
-        private static int sftpPort = 12002;
 
-        static async Task Main(string[] args)
+        public static async Task Main(string[] args)
         {
-            if (args.Length > 1 && int.TryParse(args[1], out int parsedPortWeb))
-                httpPort = parsedPortWeb;
-            if (args.Length > 3 && int.TryParse(args[3], out int parsedSftpPort))
-                sftpPort = parsedSftpPort;
+            var httpPortEnv = Environment.GetEnvironmentVariable("HTTP_PORT");
+            if (!string.IsNullOrEmpty(httpPortEnv) && int.TryParse(httpPortEnv, out int envHttpPort))
+            {
+                httpPort = envHttpPort;
+            }
+            else if (args.Length >= 1 && int.TryParse(args[0], out int argHttpPort))
+            {
+                httpPort = argHttpPort;
+            }
 
             var builder = WebApplication.CreateBuilder(args);
+
             builder.WebHost.ConfigureKestrel(options =>
             {
                 options.ListenAnyIP(httpPort);
             });
-            builder.Services.AddRazorPages();
 
-            builder.Services.AddSingleton<Logger>();
-            builder.Services.AddSingleton(provider => new ConfigManager(logger: provider.GetRequiredService<Logger>()));
-            builder.Services.AddSingleton(provider => new EmailService(config: provider.GetRequiredService<ConfigManager>().Config));
+            builder.Services.Configure<ForwardedHeadersOptions>(options =>
+            {
+                options.ForwardedHeaders =
+                    ForwardedHeaders.XForwardedFor |
+                    ForwardedHeaders.XForwardedProto;
+
+                options.KnownNetworks.Clear();
+                options.KnownProxies.Clear();
+            });
+
+            var logger = new Logger();
+            var loggerAdapter = new LoggerAdapter(logger);
+            var configManager = new ConfigManager(logger: logger);
+
+            builder.Services.AddSingleton(logger);
+            builder.Services.AddSingleton(configManager);
             builder.Services.AddSingleton(provider => provider.GetRequiredService<ConfigManager>().Config);
+
+            builder.Services.AddControllersWithViews(options =>
+            {
+                options.Filters.Add<PluginEnabledFilter>();
+            }).AddRazorRuntimeCompilation();
+
+            builder.Services.AddRazorPages();
+            builder.Services.AddCors(options =>
+            {
+                options.AddPolicy("DynamicPolicy", policyBuilder =>
+                {
+                    policyBuilder
+                        .WithOrigins($"https://{configManager.Config.PanelDomain}")
+                        .AllowAnyMethod()
+                        .AllowAnyHeader()
+                        .AllowCredentials();
+                });
+            });
+
+            builder.Services.AddMemoryCache();
+            builder.Services.AddHealthChecks();
+            builder.Services.Configure<HostOptions>(options =>
+            {
+                options.ShutdownTimeout = TimeSpan.FromSeconds(30);
+            });
+            builder.Services.AddHttpClient();
+            builder.Services.AddHttpContextAccessor();
+
+            builder.Services.AddSingleton(provider => new EmailService(config: provider.GetRequiredService<ConfigManager>().Config));
             builder.Services.AddSingleton<FilePaths>();
-            builder.Services.AddSingleton(provider => new ServerSettings { httpPort = httpPort, sftpPort = sftpPort });
+            builder.Services.AddSingleton(provider => new ServerSettings { httpPort = httpPort });
             builder.Services.AddSingleton<CacheService>();
             builder.Services.AddSingleton<IEventBus, InMemoryEventBus>();
             builder.Services.AddSingleton<Services.EventHandler>();
-            builder.Services.AddSingleton(provider => new FeatherDatabase(provider.GetRequiredService<Logger>(), provider.GetRequiredService<ConfigManager>().Config.MySQL_Config));
+            builder.Services.AddSingleton(provider => new FeatherDatabase(loggerAdapter, provider.GetRequiredService<ConfigManager>().Config.MySQL_Config));
             builder.Services.AddSingleton<UserService>();
-            builder.Services.AddSingleton<SftpServer>();
             builder.Services.AddSingleton<WebSocketServer>();
             builder.Services.AddSingleton<ValidationService>();
             builder.Services.AddSingleton<PluginManager>();
             builder.Services.AddSingleton<DownloadJobProcessor>();
             builder.Services.AddSingleton<AuthenticationService>();
             builder.Services.AddSingleton<PackageManager>();
-            builder.Services.AddSingleton<VideoService>();
-            builder.Services.AddSingleton<Nginx>();
+            builder.Services.AddSingleton<VideoStreamingService>();
+            builder.Services.AddSingleton<IAdminMenuService, AdminMenuService>();
+
+            builder.Services.AddAuthentication(options =>
+            {
+                options.DefaultAuthenticateScheme = "Bearer";
+                options.DefaultChallengeScheme = "Cookies";
+            })
+            .AddCookie(options =>
+            {
+                options.LoginPath = "/Login";
+                options.LogoutPath = "/Login";
+                options.AccessDeniedPath = "/Login";
+            })
+            .AddJwtBearer("Bearer", options =>
+            {
+                options.TokenValidationParameters = new TokenValidationParameters
+                {
+                    ValidateIssuer = false,
+                    ValidateAudience = false,
+                    ValidateLifetime = true,
+                    ValidateIssuerSigningKey = true,
+                    IssuerSigningKey = new SymmetricSecurityKey(
+                        Encoding.UTF8.GetBytes(configManager.Config.JwtSecret))
+                };
+
+                options.Events = new JwtBearerEvents
+                {
+                    OnMessageReceived = context =>
+                    {
+                        if (context.Request.Cookies.TryGetValue("X-Access-Token", out var token))
+                            context.Token = token;
+
+                        return Task.CompletedTask;
+                    },
+                    OnAuthenticationFailed = context =>
+                    {
+                        if (context.Exception is SecurityTokenExpiredException)
+                            context.Response.Cookies.Delete("X-Access-Token");
+
+                        return Task.CompletedTask;
+                    }
+                };
+            });
+
+            builder.Services.AddAuthorization();
+
+            logger.PrepareLogs();
 
             var app = builder.Build();
             var serviceProvider = app.Services;
 
-            var logger = serviceProvider.GetRequiredService<Logger>();
-            var configManager = serviceProvider.GetRequiredService<ConfigManager>();
+            app.UseForwardedHeaders();
+            app.UseStaticFiles();
+            app.UseRouting();
 
-            logger.PrepareLogs();
+            app.UseCors("DynamicPolicy");
+
+            app.UseAuthentication();
+            app.UseAuthorization();
+
+            var applicationPartManager = serviceProvider.GetRequiredService<ApplicationPartManager>();
+            var pluginManager = serviceProvider.GetRequiredService<PluginManager>();
+            var env = serviceProvider.GetRequiredService<IWebHostEnvironment>();
+
+            pluginManager.Initialize(applicationPartManager, env);
+
+            var tempPluginPath = Path.Combine(AppContext.BaseDirectory, "plugins", ".plugin_temp");
+            if (Directory.Exists(tempPluginPath))
+            {
+                try
+                {
+                    Directory.Delete(tempPluginPath, true);
+                }
+                catch (Exception ex)
+                {
+                    logger.LogError($"Failed to clean temp plugin dir: {ex.Message}");
+                }
+            }
+
+            await pluginManager.LoadPluginsAsync();
 
             var eventBus = serviceProvider.GetRequiredService<IEventBus>();
             var eventHandler = serviceProvider.GetRequiredService<Services.EventHandler>();
@@ -61,46 +185,76 @@ namespace SharpPress
             eventBus.Subscribe<VideoUploadedEvent>(eventHandler);
             eventBus.Subscribe<UserRegisteredEvent>(eventHandler);
 
-            if (Directory.Exists(Path.Combine("plugins", ".plugin_temp")))
-                Directory.Delete(Path.Combine("plugins", ".plugin_temp"), true);
+            app.UseMiddleware<UserControlMiddleware>();
+            app.UseMiddleware<PluginRouteMiddleware>();
 
-            var pluginManager = serviceProvider.GetRequiredService<PluginManager>();
-            pluginManager.Initialize(app);
-            await pluginManager.LoadPluginsAsync();
+            await Endpoints.RegisterServices(serviceProvider.GetRequiredService<ServerConfig>());
 
-            app.UseMiddleware<PluginMiddleware>(pluginManager);
-
-            app.Use(async (context, next) =>
-            {
-                context.Response.Headers.Append("Access-Control-Allow-Origin", "*");
-                context.Response.Headers.Append("Access-Control-Allow-Headers", "Content-Type, Authorization");
-                context.Response.Headers.Append("Access-Control-Allow-Methods", "POST, GET, OPTIONS");
-                if (context.Request.Method == "OPTIONS")
-                {
-                    context.Response.StatusCode = 200;
-                    return;
-                }
-                await next();
-            });
-
+            app.MapControllers();
             app.MapRazorPages();
+            app.MapHealthChecks("/health");
+
             Endpoints.Map(app, pluginManager);
 
-            var lifetime = app.Lifetime;
+            var lifetime = serviceProvider.GetRequiredService<IHostApplicationLifetime>();
             lifetime.ApplicationStopping.Register(() =>
             {
-                logger.Log("🛑 Shutdown requested...");
+                Endpoints.SignalShutdown();
 
-                serviceProvider.GetRequiredService<SftpServer>().StopAsync().GetAwaiter().GetResult();
-                serviceProvider.GetRequiredService<DownloadJobProcessor>().StopAsync().GetAwaiter().GetResult();
-                pluginManager.UnloadAllPluginsAsync().GetAwaiter().GetResult();
-
-                logger.Log("✅ Shutdown complete.");
+                logger.Log("🛑 Shutdown signal received. Stopping services...");
+                ShutdownApplication(serviceProvider, logger).GetAwaiter().GetResult();
             });
 
             logger.Log($"⚠️ Ensure Nginx is configured to proxy port 443 to localhost:{httpPort}");
             logger.Log($"🚀 Server started successfully on HTTP port {httpPort}!");
-            app.Run();
+
+            _ = Task.Run(async () =>
+            {
+                while (!app.Lifetime.ApplicationStopping.IsCancellationRequested)
+                {
+                    if (app.Lifetime.ApplicationStopping.IsCancellationRequested)
+                        break;
+
+                    await Task.Delay(50, app.Lifetime.ApplicationStopping);
+                    await pluginManager.UpdateLoadedPluginsAsync();
+                }
+            });
+
+            await PrepareDatabase(serviceProvider.GetRequiredService<FeatherDatabase>());
+            await app.RunAsync();
+        }
+
+        private static async Task PrepareDatabase(FeatherDatabase database)
+        {
+            await database.CreateTable<User>();
+            await database.CreateIndex<User>("Username");
+            await database.CreateIndex<User>("UUID");
+        }
+
+        private static async Task ShutdownApplication(IServiceProvider serviceProvider, Logger logger)
+        {
+            try
+            {
+                var downloadProcessor = serviceProvider.GetService<DownloadJobProcessor>();
+                if (downloadProcessor != null)
+                {
+                    logger.Log("🛑 Stopping Download Processor...");
+                    await downloadProcessor.StopAsync();
+                }
+
+                var plugins = serviceProvider.GetService<PluginManager>();
+                if (plugins != null)
+                {
+                    logger.Log("🛑 Unloading Plugins...");
+                    await plugins.UnloadAllPluginsAsync();
+                }
+
+                logger.Log("✅ All services stopped gracefully.");
+            }
+            catch (Exception ex)
+            {
+                logger.LogError($"Error during shutdown: {ex.Message}");
+            }
         }
     }
 }

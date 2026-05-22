@@ -1,21 +1,18 @@
-﻿using Newtonsoft.Json;
-using SharpPress.Events;
+﻿using SharpPress.Events;
 using SharpPress.Models;
+using System.Security.Claims;
 
 namespace SharpPress.Services
 {
     public class UserService
     {
-        private readonly AuthenticationService _authService;
         private readonly ValidationService _validationService;
+        private readonly AuthenticationService _authService;
         private readonly FeatherDatabase _featherDatabase;
         private readonly CacheService _cacheService;
         private readonly EmailService _emailService;
         private readonly ServerConfig _serverConfig;
         private readonly Logger _logger;
-
-        public List<User> Users { get; set; } = new List<User>();
-
         private readonly IEventBus _eventBus;
 
         public UserService(
@@ -37,38 +34,36 @@ namespace SharpPress.Services
             _serverConfig = configManager.Config;
             _featherDatabase = featherDatabase;
 
-            _featherDatabase.CreateTable<User>();
-
-            _ = Task.Run(async () =>
+            Task.Run(async () =>
             {
-                while (true)
+                var adminUser = await _featherDatabase.Query<User>().Where(u => (int)u.Roles >= (int)UserRole.Admin).FirstOrDefaultAsync();
+                if (adminUser == null)
                 {
-                    Users = _featherDatabase.GetAll<User>();
-                    await Task.Delay(TimeSpan.FromMinutes(15));
+                    adminUser = new User
+                    {
+                        Username = "admin",
+                        Password = _authService.HashPassword(configManager.Config.ADMIN_PASSWORD),
+                        Email = "admin@example.com",
+                        UUID = Guid.NewGuid().ToString(),
+                        Roles = UserRole.Admin
+                    };
+                    await _featherDatabase.SaveData(adminUser);
+                    _logger.Log($"✅ Created default admin user (email: admin@example.com, password: {configManager.Config.ADMIN_PASSWORD})");
                 }
-            });
-
-            var adminUser = _featherDatabase.GetByColumn<User>("Username", "admin");
-            if (adminUser == null)
-            {
-                adminUser = new User
-                {
-                    Username = "admin",
-                    Password = _authService.HashPassword(configManager.Config.ADMIN_PASSWORD),
-                    Email = "admin@example.com",
-                    uuid = Guid.NewGuid(),
-                    Role = "admin"
-                };
-                _featherDatabase.SaveData(adminUser);
-                _logger.Log("✅ Created default admin user (username: admin, password: admin123)");
-            }
-            else if(adminUser.Password != _authService.HashPassword(configManager.Config.ADMIN_PASSWORD))
-            {
-                adminUser.Password = _authService.HashPassword(configManager.Config.ADMIN_PASSWORD);
-                _featherDatabase.SaveData(adminUser);
-            }
+            }).GetAwaiter().GetResult();
         }
 
+        public async Task<User> GetUserAsync(ClaimsPrincipal User)
+        {
+            if (User == null || User.Identity.IsAuthenticated == false || string.IsNullOrWhiteSpace(User.Identity.Name))
+                return null;
+
+            var _user = await _featherDatabase.GetByLinq<User>(u => u.Username == User.Identity.Name);
+            if (_user == null)
+                return null;
+
+            return _user;
+        }
 
         public async Task<(User user, string message)> CreateUserAsync(RegisterRequest request)
         {
@@ -78,12 +73,12 @@ namespace SharpPress.Services
                 return (null, string.Join(", ", errors));
             }
 
-            if (_featherDatabase.GetByColumn<User>("Username", request.Username) != null)
+            if (await _featherDatabase.GetByColumn<User>("Username", request.Username) != null)
             {
                 return (null, "Username already exists");
             }
 
-            if (_featherDatabase.GetByColumn<User>("Email", request.Email) != null)
+            if (await _featherDatabase.GetByColumn<User>("Email", request.Email) != null)
             {
                 return (null, "Email already exists");
             }
@@ -93,14 +88,12 @@ namespace SharpPress.Services
                 Username = request.Username,
                 Password = _authService.HashPassword(request.Password),
                 Email = request.Email,
-                uuid = Guid.NewGuid(),
-                Role = "user",
+                UUID = Guid.NewGuid().ToString(),
+                Roles = UserRole.User,
                 RefreshToken = _authService.GenerateRefreshToken(),
                 RefreshTokenExpiry = DateTime.UtcNow.AddDays(7)
             };
-
-            _featherDatabase.SaveData(newUser);
-            Users.Add(newUser);
+            await _featherDatabase.SaveData(newUser);
 
             _logger.Log($"✅ User created: {request.Username}");
             await _eventBus.PublishAsync(new UserRegisteredEvent(newUser));
@@ -115,7 +108,7 @@ namespace SharpPress.Services
                 return (null, "Account is temporarily locked due to multiple failed login attempts");
             }
 
-            var user = _featherDatabase.GetByColumn<User>("Username", request.Username);
+            var user = await _featherDatabase.GetByColumn<User>("Username", request.Username);
 
             if (user == null)
             {
@@ -135,7 +128,7 @@ namespace SharpPress.Services
                     user.RefreshTokenExpiry = DateTime.UtcNow.AddDays(7);
                 }
 
-                _featherDatabase.SaveData(user);
+                await _featherDatabase.SaveData(user);
                 _logger.Log($"✅ User authenticated: {user.Username}");
                 return (user, "Authentication successful");
             }
@@ -148,7 +141,7 @@ namespace SharpPress.Services
 
         public async Task<(User user, string message)> RefreshTokenAsync(RefreshTokenRequest request)
         {
-            var user = _featherDatabase.GetByColumn<User>("RefreshToken", request.RefreshToken);
+            var user = await _featherDatabase.GetByColumn<User>("RefreshToken", request.RefreshToken);
 
             if (user == null)
             {
@@ -163,14 +156,14 @@ namespace SharpPress.Services
             user.RefreshToken = _authService.GenerateRefreshToken();
             user.RefreshTokenExpiry = DateTime.UtcNow.AddDays(7);
 
-            _featherDatabase.SaveData(user);
+            await _featherDatabase.SaveData(user);
             _logger.Log($"✅ Token refreshed for user: {user.Username}");
             return (user, "Token refreshed successfully");
         }
 
         public async Task<(bool success, string message)> ChangePasswordAsync(string username, string currentPassword, string newPassword)
         {
-            var user = _featherDatabase.GetByColumn<User>("Username", username);
+            var user = await _featherDatabase.GetByColumn<User>("Username", username);
 
             if (user == null)
             {
@@ -183,7 +176,7 @@ namespace SharpPress.Services
             }
 
             user.Password = _authService.HashPassword(newPassword);
-            _featherDatabase.SaveData(user);
+            await _featherDatabase.SaveData(user);
 
             _logger.Log($"✅ Password changed for user: {username}");
             return (true, "Password changed successfully");
@@ -191,7 +184,7 @@ namespace SharpPress.Services
 
         public async Task<(bool success, string message)> ConfirmPasswordResetAsync(ChangePasswordRequest request)
         {
-            var user = _featherDatabase.GetByColumn<User>("Email", request.Email);
+            var user = await _featherDatabase.GetByColumn<User>("Email", request.Email);
 
             if (user == null || !user.PasswordResetToken.Equals(request.Token, StringComparison.OrdinalIgnoreCase))
             {
@@ -207,14 +200,14 @@ namespace SharpPress.Services
             user.PasswordResetToken = null;
             user.PasswordResetTokenExpiry = DateTime.MinValue;
 
-            _featherDatabase.SaveData(user);
+            await _featherDatabase.SaveData(user);
             _logger.Log($"✅ Password reset successfully for user: {user.Email}");
             return (true, "Your password has been reset successfully. You can now log in.");
         }
 
         public async Task<(bool success, string message)> UpdateUserProfileAsync(string username, User updatedUser)
         {
-            var user = _featherDatabase.GetByColumn<User>("Username", username);
+            var user = await _featherDatabase.GetByColumn<User>("Username", username);
 
             if (user == null)
             {
@@ -223,7 +216,7 @@ namespace SharpPress.Services
 
             if (!string.IsNullOrEmpty(updatedUser.Email) && updatedUser.Email != user.Email)
             {
-                var owner = _featherDatabase.GetByColumn<User>("Email", updatedUser.Email);
+                var owner = await _featherDatabase.GetByColumn<User>("Email", updatedUser.Email);
                 if (owner != null && owner.Id != user.Id)
                 {
                     return (false, "Email already exists");
@@ -231,52 +224,48 @@ namespace SharpPress.Services
                 user.Email = updatedUser.Email;
             }
 
-            _featherDatabase.SaveData(user);
+            await _featherDatabase.SaveData(user);
             _logger.Log($"✅ Profile updated for user: {username}");
             return (true, "Profile updated successfully");
         }
 
         public async Task<(bool success, string message)> DeleteUserAsync(string username)
         {
-            var user = _featherDatabase.GetByColumn<User>("Username", username);
+            var user = await _featherDatabase.GetByColumn<User>("Username", username);
 
             if (user == null)
             {
                 return (false, "User not found");
             }
 
-            if (user.Role == "admin")
+            if (user.HasRole(UserRole.Admin))
             {
                 return (false, "Cannot delete admin user");
             }
-
-            _featherDatabase.Delete<User>(user.Id);
-            Users.Remove(user);
+            await _featherDatabase.Delete<User>(user.Id);
 
             _logger.Log($"✅ User deleted: {username}");
             return (true, "User deleted successfully");
         }
 
-        // Helper Methods for Lookups
-
-        public User GetUserByUsername(string username)
+        public async Task<User> GetUserByUsername(string username)
         {
-            return _featherDatabase.GetByColumn<User>("Username", username);
+            return await _featherDatabase.GetByColumn<User>("Username", username);
         }
 
-        public User GetUserByEmail(string email)
+        public async Task<User> GetUserByEmail(string email)
         {
-            return _featherDatabase.GetByColumn<User>("Email", email);
+            return await _featherDatabase.GetByColumn<User>("Email", email);
         }
 
-        public User GetUserByUuid(Guid uuid)
+        public async Task<User> GetUserByUuid(Guid uuid)
         {
-            return _featherDatabase.GetByColumn<User>("uuid", uuid);
+            return await _featherDatabase.GetByColumn<User>("uuid", uuid);
         }
 
         public async Task<(bool success, string message)> LogoutAsync(string username)
         {
-            var user = _featherDatabase.GetByColumn<User>("Username", username);
+            var user = await _featherDatabase.GetByColumn<User>("Username", username);
 
             if (user == null)
             {
@@ -293,7 +282,7 @@ namespace SharpPress.Services
 
         public async Task<(bool success, string message)> EnableTwoFactorAsync(string username)
         {
-            var user = _featherDatabase.GetByColumn<User>("Username", username);
+            var user = await _featherDatabase.GetByColumn<User>("Username", username);
 
             if (user == null)
             {
@@ -310,7 +299,7 @@ namespace SharpPress.Services
 
         public async Task<(bool success, string message)> DisableTwoFactorAsync(string username)
         {
-            var user = _featherDatabase.GetByColumn<User>("Username", username);
+            var user = await _featherDatabase.GetByColumn<User>("Username", username);
 
             if (user == null)
             {
@@ -327,7 +316,7 @@ namespace SharpPress.Services
 
         public async Task<(bool success, string message)> VerifyTwoFactorAsync(string username, string code)
         {
-            var user = _featherDatabase.GetByColumn<User>("Username", username);
+            var user = await _featherDatabase.GetByColumn<User>("Username", username);
 
             if (user == null)
             {
@@ -348,31 +337,31 @@ namespace SharpPress.Services
             return (true, "Two-factor authentication verified");
         }
 
-        public List<User> GetUsersByRole(string role)
+        public async Task<List<User>> GetUsersByRole(string role)
         {
-            return _featherDatabase.GetListByColumn<User>("Role", role);
+            return await _featherDatabase.GetListByColumn<User>("Role", role);
         }
 
-        public async Task<(bool success, string message)> ChangeUserRoleAsync(string username, string newRole)
+        public async Task<(bool success, string message)> ChangeUserRoleAsync(string username, UserRole newRole)
         {
-            var user = _featherDatabase.GetByColumn<User>("Username", username);
+            var user = await _featherDatabase.GetByColumn<User>("Username", username);
 
             if (user == null)
             {
                 return (false, "User not found");
             }
 
-            if (user.Role == "admin" && newRole != "admin")
+            if (user.HasRole(UserRole.Admin) && newRole != UserRole.Admin)
             {
-                var admins = _featherDatabase.GetListByColumn<User>("Role", "admin");
+                var admins = await _featherDatabase.GetListByLinq<User>(u => u.Roles == UserRole.Admin);
                 if (admins.Count <= 1)
                 {
                     return (false, "Cannot change role of the last admin user");
                 }
             }
 
-            user.Role = newRole;
-            _featherDatabase.SaveData(user);
+            user.Roles = newRole;
+            await _featherDatabase.SaveData(user);
 
             _logger.Log($"✅ Role changed for user {username} to {newRole}");
             return (true, "Role changed successfully");
@@ -380,7 +369,7 @@ namespace SharpPress.Services
 
         public async Task<(bool success, string message)> LockUserAsync(string username, int lockDurationMinutes = 30)
         {
-            var user = _featherDatabase.GetByColumn<User>("Username", username);
+            var user = await _featherDatabase.GetByColumn<User>("Username", username);
 
             if (user == null)
             {
@@ -388,7 +377,7 @@ namespace SharpPress.Services
             }
 
             user.LockedUntil = DateTime.UtcNow.AddMinutes(lockDurationMinutes);
-            _featherDatabase.SaveData(user);
+            await _featherDatabase.SaveData(user);
 
             _logger.Log($"🔒 User locked: {username} until {user.LockedUntil}");
             return (true, $"User locked for {lockDurationMinutes} minutes");
@@ -396,7 +385,7 @@ namespace SharpPress.Services
 
         public async Task<(bool success, string message)> UnlockUserAsync(string username)
         {
-            var user = _featherDatabase.GetByColumn<User>("Username", username);
+            var user = await _featherDatabase.GetByColumn<User>("Username", username);
 
             if (user == null)
             {
@@ -407,7 +396,7 @@ namespace SharpPress.Services
             user.FailedLoginAttempts = 0;
 
             _authService.ResetFailedLoginAttempts(username);
-            _featherDatabase.SaveData(user);
+            await _featherDatabase.SaveData(user);
 
             _logger.Log($"🔓 User unlocked: {username}");
             return (true, "User unlocked successfully");
