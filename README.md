@@ -34,12 +34,12 @@ public class TestPlugin : IPlugin
 
     }
 
-    public async OnUpdateAsync(IPluginContext context)
+    public async Task OnUpdateAsync(IPluginContext context)
     {
 
     }
 
-    public async OnUnloadAsync()
+    public async Task OnUnloadAsync()
     {
 
     }
