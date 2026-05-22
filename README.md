@@ -25,6 +25,8 @@ public class TestPlugin : IPlugin
 {
     public string Name => "TestPlugin";
     public string Version => "2.1.155";
+    public string Author=> "Alireza";
+    public string? Description => "A simple test plugin";
 
 
     public async Task OnLoadAsync(IPluginContext context)
