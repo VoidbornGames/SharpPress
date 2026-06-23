@@ -2,12 +2,11 @@
 using Microsoft.AspNetCore.HttpOverrides;
 using Microsoft.AspNetCore.Mvc.ApplicationParts;
 using Microsoft.AspNetCore.Mvc.Infrastructure;
-using Microsoft.AspNetCore.Mvc.Razor;
 using Microsoft.IdentityModel.Tokens;
-using SharpPress.Events;
 using SharpPress.Helpers;
 using SharpPress.Middlewares;
 using SharpPress.Models;
+using SharpPress.Modules;
 using SharpPress.Plugins;
 using SharpPress.Servers;
 using SharpPress.Services;
@@ -52,9 +51,17 @@ namespace SharpPress
             var loggerAdapter = new LoggerAdapter(logger);
             var configManager = new ConfigManager(logger: logger);
 
+            var moduleStateService = new ModuleStateService();
+            var moduleManager = new ModuleManager(logger, moduleStateService);
+
+            await moduleManager.LoadModulesAsync();
+            moduleManager.RunBeforeBuild(builder);
+
             builder.Services.AddSingleton(logger);
             builder.Services.AddSingleton(configManager);
             builder.Services.AddSingleton(provider => provider.GetRequiredService<ConfigManager>().Config);
+            builder.Services.AddSingleton(moduleManager);
+            builder.Services.AddSingleton(moduleStateService);
 
             builder.Services.AddControllersWithViews(options =>
             {
@@ -154,6 +161,8 @@ namespace SharpPress
 
             var app = builder.Build();
             var serviceProvider = app.Services;
+
+            await moduleManager.RunAfterBuildAsync(app);
 
             app.UseForwardedHeaders();
             app.UseMiddleware<UserControlMiddleware>();
