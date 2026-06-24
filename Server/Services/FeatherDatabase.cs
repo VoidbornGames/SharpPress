@@ -186,6 +186,33 @@ namespace SharpPress.Services
             }).ConfigureAwait(false);
         }
 
+        public async Task<UpdateDataResult> UpdateData<T>(T obj, params Expression<Func<T, object>>[] fieldsToUpdate) where T : new()
+        {
+            await using var connection = new MySqlConnection(_connectionString);
+            await connection.OpenAsync(_globalCancellationToken).ConfigureAwait(false);
+            return await UpdateDataInternal(connection, null, obj, fieldsToUpdate).ConfigureAwait(false);
+        }
+
+        public async Task<List<UpdateDataResult>> UpdateMultiData<T>(List<T> items, params Expression<Func<T, object>>[] fieldsToUpdate) where T : new()
+        {
+            if (items == null || items.Count == 0)
+                return new List<UpdateDataResult>();
+
+            var results = new List<UpdateDataResult>();
+
+            await ExecuteInTransactionAsync(async (connection, transaction) =>
+            {
+                foreach (var item in items)
+                {
+                    var result = await UpdateDataInternal(connection, transaction, item, fieldsToUpdate)
+                        .ConfigureAwait(false);
+                    results.Add(result);
+                }
+            }).ConfigureAwait(false);
+
+            return results;
+        }
+
         public async Task<T?> GetData<T>(long id) where T : new()
         {
             var type = typeof(T);
@@ -593,6 +620,128 @@ namespace SharpPress.Services
             }
         }
 
+        private async Task<UpdateDataResult> UpdateDataInternal<T>(MySqlConnection connection, MySqlTransaction? transaction, T obj, Expression<Func<T, object>>[] fieldsToUpdate) where T : new()
+        {
+            var type = typeof(T);
+            var props = GetCachedProperties(type);
+            var tableName = GetTableName(type);
+
+            var idProp = props.FirstOrDefault(p => p.Name.Equals("Id", StringComparison.OrdinalIgnoreCase))
+                         ?? throw new InvalidOperationException($"Type {type.Name} must have an Id property.");
+
+            var idValueObj = idProp.GetValue(obj);
+            long idValue = idValueObj != null ? Convert.ToInt64(idValueObj) : 0;
+
+            if (idValue <= 0)
+                throw new InvalidOperationException(
+                    "Cannot update a record with Id <= 0. Use SaveData for new records.");
+
+            var versionProp = props.FirstOrDefault(p =>
+                p.Name.Equals("Version", StringComparison.OrdinalIgnoreCase) &&
+                (p.PropertyType == typeof(int) || p.PropertyType == typeof(long) ||
+                 p.PropertyType == typeof(int?) || p.PropertyType == typeof(long?)));
+
+            var updatedAtProp = props.FirstOrDefault(p =>
+                p.Name.Equals("UpdatedAt", StringComparison.OrdinalIgnoreCase) &&
+                (p.PropertyType == typeof(DateTime) || p.PropertyType == typeof(DateTime?)));
+
+            var updateProps = new List<PropertyInfo>();
+
+            if (fieldsToUpdate is { Length: > 0 })
+            {
+                foreach (var expr in fieldsToUpdate)
+                {
+                    var name = GetPropertyName(expr);
+                    if (name.Equals("Id", StringComparison.OrdinalIgnoreCase) ||
+                        name.Equals("Version", StringComparison.OrdinalIgnoreCase))
+                        continue;
+
+                    var prop = props.FirstOrDefault(p =>
+                                   p.Name.Equals(name, StringComparison.OrdinalIgnoreCase))
+                               ?? throw new ArgumentException(
+                                   $"Property '{name}' not found on type {type.Name}.");
+
+                    if (!updateProps.Contains(prop))
+                        updateProps.Add(prop);
+                }
+            }
+            else
+            {
+                updateProps = props
+                    .Where(p => !p.Name.Equals("Id", StringComparison.OrdinalIgnoreCase) &&
+                                !p.Name.Equals("Version", StringComparison.OrdinalIgnoreCase))
+                    .ToList();
+            }
+
+            if (updateProps.Count == 0)
+                throw new ArgumentException("No valid fields to update.", nameof(fieldsToUpdate));
+
+            var setClauses = new List<string>();
+            var parameters = new List<MySqlParameter> { new("@Id", idValue) };
+
+            foreach (var prop in updateProps)
+            {
+                setClauses.Add($"`{prop.Name}` = @upd_{prop.Name}");
+                parameters.Add(new MySqlParameter($"@upd_{prop.Name}", ToDbValue(prop.GetValue(obj))));
+            }
+
+            if (updatedAtProp != null && !updateProps.Contains(updatedAtProp))
+            {
+                var now = DateTime.UtcNow;
+                setClauses.Add($"`{updatedAtProp.Name}` = @upd__autoUpdatedAt");
+                parameters.Add(new MySqlParameter("@upd__autoUpdatedAt", now));
+                updatedAtProp.SetValue(obj, now);
+            }
+
+            if (versionProp != null)
+            {
+                setClauses.Add($"`{versionProp.Name}` = `{versionProp.Name}` + 1");
+            }
+
+            var whereClause = $"`{idProp.Name}` = @Id";
+            if (versionProp != null)
+            {
+                var currentVersion = Convert.ToInt64(versionProp.GetValue(obj));
+                whereClause += $" AND `{versionProp.Name}` = @CurrentVersion";
+                parameters.Add(new MySqlParameter("@CurrentVersion", currentVersion));
+            }
+
+            var sql = $"UPDATE `{tableName}` SET {string.Join(", ", setClauses)} WHERE {whereClause}";
+
+            await using var cmd = new MySqlCommand(sql, connection, transaction);
+            if (parameters.Count > 0)
+                cmd.Parameters.AddRange(parameters.ToArray());
+
+            int rowsAffected = await cmd.ExecuteNonQueryAsync(_globalCancellationToken).ConfigureAwait(false);
+
+            if (versionProp != null && rowsAffected > 0)
+            {
+                var currentVersion = Convert.ToInt64(versionProp.GetValue(obj));
+                var nextVersion = currentVersion + 1;
+
+                if (versionProp.PropertyType == typeof(int))
+                    versionProp.SetValue(obj, (int)nextVersion);
+                else if (versionProp.PropertyType == typeof(long))
+                    versionProp.SetValue(obj, nextVersion);
+                else if (versionProp.PropertyType == typeof(int?))
+                    versionProp.SetValue(obj, (int?)nextVersion);
+                else
+                    versionProp.SetValue(obj, (long?)nextVersion);
+            }
+
+            bool concurrencyConflict = versionProp != null && rowsAffected == 0;
+
+            return new UpdateDataResult
+            {
+                Success = rowsAffected > 0,
+                RowsAffected = rowsAffected,
+                ConcurrencyConflict = concurrencyConflict,
+                Message = concurrencyConflict
+                    ? "Optimistic concurrency conflict: the record was modified by another process."
+                    : rowsAffected > 0 ? "Update successful." : "No rows matched the update criteria."
+            };
+        }
+
         private async Task ExecuteInTransactionAsync(Func<MySqlConnection, MySqlTransaction, Task> action)
         {
             for (int attempt = 0; attempt < MaxRetryAttempts; attempt++)
@@ -965,6 +1114,28 @@ namespace SharpPress.Services
         public class MigrationException : Exception
         {
             public MigrationException(string message, Exception inner) : base(message, inner) { }
+        }
+
+        public class UpdateDataResult
+        {
+            public bool Success { get; init; }
+            public int RowsAffected { get; init; }
+            public bool ConcurrencyConflict { get; init; }
+            public string Message { get; init; } = "";
+
+            public void EnsureSuccess()
+            {
+                if (!Success)
+                    throw ConcurrencyConflict
+                        ? new OptimisticConcurrencyException(Message)
+                        : new InvalidOperationException(Message);
+            }
+        }
+
+        public class OptimisticConcurrencyException : Exception
+        {
+            public OptimisticConcurrencyException(string message) : base(message) { }
+            public OptimisticConcurrencyException(string message, Exception inner) : base(message, inner) { }
         }
 
         public async ValueTask DisposeAsync()

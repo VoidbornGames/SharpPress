@@ -18,10 +18,6 @@ namespace SharpPress
 {
     public static class Endpoints
     {
-        public static bool disableDefaultLoginRoute = false;
-        public static bool disableDefaultRegisterRoute = false;
-
-
         private static readonly ConcurrentDictionary<string, CachedFile> _fileCache = new();
         private static readonly ConcurrentDictionary<string, int> _readCounts = new();
         private static readonly ConcurrentDictionary<string, SemaphoreSlim> _fileLocks = new();
@@ -177,63 +173,6 @@ namespace SharpPress
             }
 
             //app.MapGet("/health", () => Results.Ok(new { status = "Healthy", timestamp = DateTime.UtcNow }));
-
-            if (disableDefaultLoginRoute == false)
-            {
-                app.MapPost("/api/login", async (
-                    HttpContext context,
-                    [FromBody] LoginRequest loginRequest,
-                    UserService userService,
-                    AuthenticationService authService,
-                    Logger logger) =>
-                {
-                    if (loginRequest == null) return Results.BadRequest(new { success = false, message = "Invalid request" });
-
-                    var (user, message) = await userService.AuthenticateUserAsync(loginRequest);
-                    if (user != null)
-                    {
-                        var token = authService.GenerateJwtToken(user);
-                        logger.Log($"✅ User logged in: {user.Username} | IP: {ResolveClientIp(context.Request)}");
-                        return Results.Ok(new
-                        {
-                            success = true,
-                            token,
-                            refreshToken = user.RefreshToken,
-                            user = new { username = user.Username, role = user.Roles, email = user.Email }
-                        });
-                    }
-                    return Results.Unauthorized();
-                });
-            }
-
-            if (disableDefaultRegisterRoute == false)
-            {
-                app.MapPost("/api/register", async (
-                    HttpContext context,
-                    [FromBody] RegisterRequest registerRequest,
-                    UserService userService,
-                    AuthenticationService authService,
-                    Logger logger) =>
-                {
-                    if (registerRequest == null) return Results.BadRequest(new { success = false, message = "Invalid request" });
-                    if (!allowRegisters) return Results.BadRequest(new { success = false, message = "Registration is disabled" });
-
-                    var (user, message) = await userService.CreateUserAsync(registerRequest);
-                    if (user != null)
-                    {
-                        var token = authService.GenerateJwtToken(user);
-                        logger.Log($"✅ User registered: {user.Username} | IP: {ResolveClientIp(context.Request)}");
-                        return Results.Ok(new
-                        {
-                            success = true,
-                            token,
-                            refreshToken = user.RefreshToken,
-                            user = new { username = user.Username, role = user.Roles, email = user.Email }
-                        });
-                    }
-                    return Results.BadRequest(new { success = false, message });
-                });
-            }
 
             app.MapGet("/api/plugins", (
                 HttpRequest request,
