@@ -1,148 +1,45 @@
 ﻿<Project Sdk="Microsoft.NET.Sdk.Web">
 
-        <PropertyGroup>
-                <OutputType>Exe</OutputType>
-                <TargetFramework>net8.0</TargetFramework>
-                <ImplicitUsings>enable</ImplicitUsings>
-                <Nullable>enable</Nullable>
+	<PropertyGroup>
+		<OutputType>Exe</OutputType>
+		<TargetFramework>net8.0</TargetFramework>
+		<ImplicitUsings>enable</ImplicitUsings>
+		<Nullable>enable</Nullable>
+		<PreserveCompilationContext>true</PreserveCompilationContext>
+	</PropertyGroup>
 
-                <PreserveCompilationContext>true</PreserveCompilationContext>
-        </PropertyGroup>
-        
-        <ItemGroup>
-          <Reference Include="AngleSharp">
-            <HintPath>..\..\Puffercloud\deps\AngleSharp.dll</HintPath>
-          </Reference>
-          <Reference Include="AngleSharp.Css">
-            <HintPath>..\..\Puffercloud\deps\AngleSharp.Css.dll</HintPath>
-          </Reference>
-          <Reference Include="BCrypt.Net-Next">
-            <HintPath>..\..\Puffercloud\deps\BCrypt.Net-Next.dll</HintPath>
-          </Reference>
-          <Reference Include="BouncyCastle.Cryptography">
-            <HintPath>..\..\Puffercloud\deps\BouncyCastle.Cryptography.dll</HintPath>
-          </Reference>
-          <Reference Include="EmbedIO">
-            <HintPath>..\..\Puffercloud\deps\EmbedIO.dll</HintPath>
-          </Reference>
-          <Reference Include="EmbedIO.BearerToken">
-            <HintPath>..\..\Puffercloud\deps\EmbedIO.BearerToken.dll</HintPath>
-          </Reference>
-          <Reference Include="FluentFTP">
-            <HintPath>..\..\Puffercloud\deps\FluentFTP.dll</HintPath>
-          </Reference>
-          <Reference Include="HtmlSanitizer">
-            <HintPath>..\..\Puffercloud\deps\HtmlSanitizer.dll</HintPath>
-          </Reference>
-          <Reference Include="HttpMultipartParser">
-            <HintPath>..\..\Puffercloud\deps\HttpMultipartParser.dll</HintPath>
-          </Reference>
-          <Reference Include="MailKit">
-            <HintPath>..\..\Puffercloud\deps\MailKit.dll</HintPath>
-          </Reference>
-          <Reference Include="Microsoft.AspNetCore.Authentication.JwtBearer">
-            <HintPath>..\..\Puffercloud\deps\Microsoft.AspNetCore.Authentication.JwtBearer.dll</HintPath>
-          </Reference>
-          <Reference Include="Microsoft.AspNetCore.Mvc.Razor.Extensions">
-            <HintPath>..\..\Puffercloud\deps\Microsoft.AspNetCore.Mvc.Razor.Extensions.dll</HintPath>
-          </Reference>
-          <Reference Include="Microsoft.AspNetCore.Mvc.Razor.RuntimeCompilation">
-            <HintPath>..\..\Puffercloud\deps\Microsoft.AspNetCore.Mvc.Razor.RuntimeCompilation.dll</HintPath>
-          </Reference>
-          <Reference Include="Microsoft.AspNetCore.Razor.Language">
-            <HintPath>..\..\Puffercloud\deps\Microsoft.AspNetCore.Razor.Language.dll</HintPath>
-          </Reference>
-          <Reference Include="Microsoft.CodeAnalysis">
-            <HintPath>..\..\Puffercloud\deps\Microsoft.CodeAnalysis.dll</HintPath>
-          </Reference>
-          <Reference Include="Microsoft.CodeAnalysis.CSharp">
-            <HintPath>..\..\Puffercloud\deps\Microsoft.CodeAnalysis.CSharp.dll</HintPath>
-          </Reference>
-          <Reference Include="Microsoft.CodeAnalysis.Razor">
-            <HintPath>..\..\Puffercloud\deps\Microsoft.CodeAnalysis.Razor.dll</HintPath>
-          </Reference>
-          <Reference Include="Microsoft.Extensions.DependencyInjection">
-            <HintPath>..\..\Puffercloud\deps\Microsoft.Extensions.DependencyInjection.dll</HintPath>
-          </Reference>
-          <Reference Include="Microsoft.Extensions.DependencyInjection.Abstractions">
-            <HintPath>..\..\Puffercloud\deps\Microsoft.Extensions.DependencyInjection.Abstractions.dll</HintPath>
-          </Reference>
-          <Reference Include="Microsoft.Extensions.DependencyModel">
-            <HintPath>..\..\Puffercloud\deps\Microsoft.Extensions.DependencyModel.dll</HintPath>
-          </Reference>
-          <Reference Include="Microsoft.IdentityModel.Abstractions">
-            <HintPath>..\..\Puffercloud\deps\Microsoft.IdentityModel.Abstractions.dll</HintPath>
-          </Reference>
-          <Reference Include="Microsoft.IdentityModel.JsonWebTokens">
-            <HintPath>..\..\Puffercloud\deps\Microsoft.IdentityModel.JsonWebTokens.dll</HintPath>
-          </Reference>
-          <Reference Include="Microsoft.IdentityModel.Logging">
-            <HintPath>..\..\Puffercloud\deps\Microsoft.IdentityModel.Logging.dll</HintPath>
-          </Reference>
-          <Reference Include="Microsoft.IdentityModel.Protocols">
-            <HintPath>..\..\Puffercloud\deps\Microsoft.IdentityModel.Protocols.dll</HintPath>
-          </Reference>
-          <Reference Include="Microsoft.IdentityModel.Protocols.OpenIdConnect">
-            <HintPath>..\..\Puffercloud\deps\Microsoft.IdentityModel.Protocols.OpenIdConnect.dll</HintPath>
-          </Reference>
-          <Reference Include="Microsoft.IdentityModel.Tokens">
-            <HintPath>..\..\Puffercloud\deps\Microsoft.IdentityModel.Tokens.dll</HintPath>
-          </Reference>
-          <Reference Include="Microsoft.IO.RecyclableMemoryStream">
-            <HintPath>..\..\Puffercloud\deps\Microsoft.IO.RecyclableMemoryStream.dll</HintPath>
-          </Reference>
-          <Reference Include="MimeKit">
-            <HintPath>..\..\Puffercloud\deps\MimeKit.dll</HintPath>
-          </Reference>
-          <Reference Include="MySqlConnector">
-            <HintPath>..\..\Puffercloud\deps\MySqlConnector.dll</HintPath>
-          </Reference>
-          <Reference Include="Newtonsoft.Json">
-            <HintPath>bin\Release\net8.0\Newtonsoft.Json.dll</HintPath>
-          </Reference>
-          <Reference Include="RazorEngineCore">
-            <HintPath>..\..\Puffercloud\deps\RazorEngineCore.dll</HintPath>
-          </Reference>
-          <Reference Include="RazorLight">
-            <HintPath>..\..\Puffercloud\deps\RazorLight.dll</HintPath>
-          </Reference>
-          <Reference Include="Renci.SshNet">
-            <HintPath>..\..\Puffercloud\deps\Renci.SshNet.dll</HintPath>
-          </Reference>
-          <Reference Include="SixLabors.ImageSharp">
-            <HintPath>..\..\..\Users\Naboodi\Downloads\SixLabors.ImageSharp.dll</HintPath>
-          </Reference>
-          <Reference Include="Swan.Lite">
-            <HintPath>..\..\Puffercloud\deps\Swan.Lite.dll</HintPath>
-          </Reference>
-          <Reference Include="System.Collections.Immutable">
-            <HintPath>..\..\Puffercloud\deps\System.Collections.Immutable.dll</HintPath>
-          </Reference>
-          <Reference Include="System.Configuration.ConfigurationManager">
-            <HintPath>..\..\Puffercloud\deps\System.Configuration.ConfigurationManager.dll</HintPath>
-          </Reference>
-          <Reference Include="System.Diagnostics.EventLog">
-            <HintPath>..\..\Puffercloud\deps\System.Diagnostics.EventLog.dll</HintPath>
-          </Reference>
-          <Reference Include="System.Diagnostics.PerformanceCounter">
-            <HintPath>..\..\Puffercloud\deps\System.Diagnostics.PerformanceCounter.dll</HintPath>
-          </Reference>
-          <Reference Include="System.IdentityModel.Tokens.Jwt">
-            <HintPath>..\..\Puffercloud\deps\System.IdentityModel.Tokens.Jwt.dll</HintPath>
-          </Reference>
-          <Reference Include="System.Reflection.Metadata">
-            <HintPath>..\..\Puffercloud\deps\System.Reflection.Metadata.dll</HintPath>
-          </Reference>
-          <Reference Include="System.Security.Cryptography.Pkcs">
-            <HintPath>..\..\Puffercloud\deps\System.Security.Cryptography.Pkcs.dll</HintPath>
-          </Reference>
-          <Reference Include="System.Security.Cryptography.ProtectedData">
-            <HintPath>..\..\Puffercloud\deps\System.Security.Cryptography.ProtectedData.dll</HintPath>
-          </Reference>
-        </ItemGroup>
+	<ItemGroup>
+		<Folder Include="Controllers\" />
+	</ItemGroup>
 
-        <ItemGroup>
-          <Folder Include="Controllers\" />
-        </ItemGroup>
+	<ItemGroup>
+	  <PackageReference Include="AngleSharp" Version="0.17.1" />
+	  <PackageReference Include="AngleSharp.Css" Version="0.17.0" />
+	  <PackageReference Include="BCrypt.Net-Next" Version="4.2.0" />
+	  <PackageReference Include="BouncyCastle.Cryptography" Version="2.6.2" />
+	  <PackageReference Include="EmbedIO" Version="3.5.2" />
+	  <PackageReference Include="EmbedIO.BearerToken" Version="3.4.2" />
+	  <PackageReference Include="FluentFTP" Version="54.2.0" />
+	  <PackageReference Include="HtmlSanitizer" Version="9.0.892" />
+	  <PackageReference Include="HttpMultipartParser" Version="10.0.0" />
+	  <PackageReference Include="MailKit" Version="4.17.0" />
+	  <PackageReference Include="Microsoft.AspNetCore.Authentication.JwtBearer" Version="8.*" />
+	  <PackageReference Include="Microsoft.CodeAnalysis.CSharp" Version="5.3.0" />
+	  <PackageReference Include="Microsoft.CodeAnalysis.Razor" Version="6.0.36" />
+	  <PackageReference Include="Microsoft.Extensions.DependencyModel" Version="8.*" />
+	  <PackageReference Include="Microsoft.IO.RecyclableMemoryStream" Version="3.0.1" />
+	  <PackageReference Include="MimeKit" Version="4.17.0" />
+	  <PackageReference Include="MySqlConnector" Version="2.6.0" />
+	  <PackageReference Include="Newtonsoft.Json" Version="13.0.4" />
+	  <PackageReference Include="RazorEngineCore" Version="2026.1.1" />
+	  <PackageReference Include="RazorLight" Version="2.3.1" />
+	  <PackageReference Include="SixLabors.ImageSharp" Version="3.1.12" />
+	  <PackageReference Include="SSH.NET" Version="2025.1.0" />
+	  <PackageReference Include="System.Configuration.ConfigurationManager" Version="8.*" />
+	  <PackageReference Include="System.Diagnostics.EventLog" Version="8.*" />
+	  <PackageReference Include="System.Diagnostics.PerformanceCounter" Version="8.*" />
+	  <PackageReference Include="System.Security.Cryptography.Pkcs" Version="8.*" />
+	  <PackageReference Include="System.Security.Cryptography.ProtectedData" Version="8.*" />
+	</ItemGroup>
 
 </Project>
