@@ -71,22 +71,12 @@ public class TestPlugin : IPlugin
 - Id Convention: It requires model classes to inheritance from FeatherData class, which is mapped to a primary BIGINT AUTO_INCREMENT column.
 - Connection Pooling: The connection string is configured with connection pooling enabled, which is good for web application performance.
 
-## Security
-**Please review our [Security Policy](SECURITY.md) for reporting vulnerabilities and security-related guidelines.**
+## Star History
 
-## Code of Conduct
-**We are committed to fostering an open and welcoming environment. Please read our [Code of Conduct](CODE_OF_CONDUCT.md) before participating in our community.**
-
-### Contributing
-**We welcome contributions! Please read our Contributing Guidelines before submitting pull requests.**
-1. Fork the repository
-2. Create a feature branch (``` git checkout -b feature/amazing-feature ```)
-3. Commit your changes (``` git commit -m 'Add amazing feature' ```)
-4. Push to the branch (``` git push origin feature/amazing-feature ```)
-5. Open a Pull Request
-
-## License
-### SharpPress is released under the MIT License. See the [LICENSE](LICENSE) file for details.
-
-
-**Built for everyone by Alireza Janaki and contributors.**
+<a href="https://www.star-history.com/?repos=VoidbornGames%2FSharpPress&type=date&logscale=&legend=bottom-right">
+ <picture>
+   <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/chart?repos=VoidbornGames/SharpPress&type=date&theme=dark&legend=bottom-right" />
+   <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/chart?repos=VoidbornGames/SharpPress&type=date&legend=bottom-right" />
+   <img alt="Star History Chart" src="https://api.star-history.com/chart?repos=VoidbornGames/SharpPress&type=date&legend=bottom-right" />
+ </picture>
+</a>
