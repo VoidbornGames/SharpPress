@@ -31,8 +31,9 @@ namespace SharpPress.Services
         private readonly ConcurrentDictionary<string, string> _legacyRoutesToPluginMap = new();
         private readonly ConcurrentDictionary<string, Assembly> _pluginAssemblies = new();
         private readonly ConcurrentDictionary<Type, string> _typeToPluginMap = new();
+        private readonly ConcurrentDictionary<string, string> _pluginToAssemblyPath = new();
 
-        public readonly ConcurrentDictionary<string, string> _pluginToAssemblyPath = new();
+        public IReadOnlyDictionary<string, string> PluginToAssemblyPath => _pluginToAssemblyPath;
 
         private ApplicationPartManager? _partManager;
         private IWebHostEnvironment? _env;
@@ -218,13 +219,13 @@ namespace SharpPress.Services
             }
         }
 
-        public IReadOnlyDictionary<string, IPlugin> GetLoadedPlugins()
-            => _loadedPlugins;
+        public IReadOnlyDictionary<string, IPlugin> GetLoadedPlugins() => _loadedPlugins;
+        private const int ReloadStabilizationDelayMs = 1000;
 
         public async Task ReloadAllPluginsAsync()
         {
             await UnloadAllPluginsAsync();
-            await Task.Delay(1000);
+            await Task.Delay(ReloadStabilizationDelayMs);
             await LoadPluginsAsync();
         }
 
@@ -297,8 +298,9 @@ namespace SharpPress.Services
                 {
                     context.Unload();
                 }
-                catch
+                catch (Exception ex)
                 {
+                    _logger.LogError($"Plugin context unload error: {ex}");
                 }
             }
 
@@ -531,8 +533,8 @@ namespace SharpPress.Services
 
         public void NotifyChange()
         {
-            using var cta = new CancellationTokenSource();
-            var old = Interlocked.Exchange(ref _cts, cta);
+            using var newCts = new CancellationTokenSource();
+            var old = Interlocked.Exchange(ref _cts, newCts);
             old.Cancel();
             old.Dispose();
         }

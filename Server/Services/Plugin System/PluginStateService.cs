@@ -36,7 +36,15 @@ namespace SharpPress.Services
             {
                 if (!File.Exists(_statePath)) return;
                 var json = File.ReadAllText(_statePath);
-                _state = JsonSerializer.Deserialize<Dictionary<string, bool>>(json) ?? new();
+                var deserializedState = JsonSerializer.Deserialize<Dictionary<string, bool>>(json);
+
+                if (deserializedState is null)
+                {
+                    Console.Error.WriteLine($"Plugin state file '{_statePath}' was deserialized as null. Falling back to empty plugin state.");
+                    _state = new();
+                }
+                else
+                    _state = deserializedState;
             }
             catch (Exception ex)
             {

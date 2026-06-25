@@ -12,6 +12,7 @@ using System.IO.Compression;
 using System.Net;
 using System.Net.NetworkInformation;
 using System.Net.Sockets;
+using System.Security;
 using System.Security.Cryptography;
 using System.Text;
 
@@ -274,7 +275,10 @@ namespace SharpPress
                     if (tempFilePath != null && File.Exists(tempFilePath))
                     {
                         try { File.Delete(tempFilePath); }
-                        catch { }
+                        catch (Exception ex)
+                        {
+                            logger.LogError($"Failed to delete temporary plugin file '{tempFilePath}': {ex.Message}");
+                        }
                     }
                 }
             });
@@ -392,7 +396,10 @@ namespace SharpPress
                                 totalBytesSent += nicStats.BytesSent;
                                 totalBytesReceived += nicStats.BytesReceived;
                             }
-                            catch { }
+                            catch (Exception ex)
+                            {
+                                Console.Error.WriteLine($"Failed to read IPv4 statistics for network interface '{nic.Name}': {ex.Message}");
+                            }
                         }
                     }
 
@@ -764,9 +771,28 @@ namespace SharpPress
                     }
                 }
             }
-            catch
+            catch (UnauthorizedAccessException ex)
             {
+                Console.Error.WriteLine($"Unauthorized access while resolving symbolic link for '{filePath}': {ex}");
                 context.Response.StatusCode = 403;
+                return true;
+            }
+            catch (SecurityException ex)
+            {
+                Console.Error.WriteLine($"Security exception while resolving symbolic link for '{filePath}': {ex}");
+                context.Response.StatusCode = 403;
+                return true;
+            }
+            catch (IOException ex)
+            {
+                Console.Error.WriteLine($"I/O exception while resolving symbolic link for '{filePath}': {ex}");
+                context.Response.StatusCode = 403;
+                return true;
+            }
+            catch (Exception ex)
+            {
+                Console.Error.WriteLine($"Unexpected exception while resolving symbolic link for '{filePath}': {ex}");
+                context.Response.StatusCode = 500;
                 return true;
             }
 
@@ -953,7 +979,12 @@ namespace SharpPress
 
                 if (await Task.WhenAny(processTask, timeoutTask) == timeoutTask)
                 {
-                    try { process.Kill(); } catch { }
+                    try { process.Kill(); }
+                    catch (Exception ex)
+                    {
+                        Trace.TraceError($"Failed to kill timed-out PHP process. {ex}");
+                    }
+
                     response.StatusCode = 504;
                     response.ContentType = "text/html; charset=utf-8";
                     await response.WriteAsync("<html><body><h1>Gateway Timeout</h1><p>Script execution timed out.</p></body></html>");
@@ -1252,7 +1283,7 @@ namespace SharpPress
         {
             var input = $"{filePath}:{lastModified.Ticks}:{fileSize}";
             var hash = SHA256.HashData(Encoding.UTF8.GetBytes(input));
-            return $"\"{Convert.ToBase64String(hash).Substring(0, 16)}\"";
+            return $"\"{Convert.ToBase64String(hash[..12])}\"";
         }
 
         private static void SetCacheHeaders(HttpContext context, string extension)

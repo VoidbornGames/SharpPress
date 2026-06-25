@@ -54,7 +54,10 @@ namespace SharpPress.Servers
             {
                 _http.Stop();
             }
-            catch { }
+            catch (Exception ex)
+            {
+                _logger.Log($"⚠️ Failed to stop HttpListener cleanly: {ex}");
+            }
 
             foreach (var client in _clients.Values)
             {
@@ -65,7 +68,10 @@ namespace SharpPress.Servers
                         "Server Shutting Down",
                         CancellationToken.None);
                 }
-                catch { }
+                catch (Exception ex)
+                {
+                    _logger.LogError($"⚠ Failed to close WebSocket client {client.Id}: {ex}");
+                }
             }
 
             _logger.Log("🛑 WebSocketServer stopped.");
@@ -139,7 +145,8 @@ namespace SharpPress.Servers
 
                 if (client.Socket.State == WebSocketState.Open)
                 {
-                    try { await client.Socket.CloseAsync(WebSocketCloseStatus.NormalClosure, "Closed", CancellationToken.None); } catch { }
+                    try { await client.Socket.CloseAsync(WebSocketCloseStatus.NormalClosure, "Closed", CancellationToken.None); }
+                    catch (Exception ex) { _logger.LogError($"⚠ Failed to close websocket ({client.Id}): {ex}"); }
                 }
 
                 _logger.Log($"🔴 Client disconnected: {client.Id}");
@@ -175,7 +182,14 @@ namespace SharpPress.Servers
                 _logger.Log($"📥 [{client.Id}]: {json}");
 
                 Data? req = null;
-                try { req = JsonConvert.DeserializeObject<Data>(json); } catch { }
+                try
+                {
+                    req = JsonConvert.DeserializeObject<Data>(json);
+                }
+                catch (JsonException ex)
+                {
+                    _logger.LogError($"⚠ Invalid JSON from {client.Id}: {ex.Message}. Payload: {json}");
+                }
 
                 if (req == null)
                 {
