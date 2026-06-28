@@ -30,7 +30,7 @@ namespace SharpPress.Pages
             if (pluginFile != null && pluginFile.FileName.EndsWith(".dll", StringComparison.OrdinalIgnoreCase))
             {
                 var filePath = Path.Combine("plugins", pluginFile.FileName);
-                var pluginName = pluginManager._pluginToAssemblyPath.Where(p => p.Value == filePath).FirstOrDefault().Key;
+                var pluginName = pluginManager.PluginToAssemblyPath.Where(p => p.Value == filePath).FirstOrDefault().Key;
 
                 if (System.IO.File.Exists(filePath) && !string.IsNullOrWhiteSpace(pluginName))
                 {

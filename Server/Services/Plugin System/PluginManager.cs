@@ -473,6 +473,15 @@ namespace SharpPress.Services
 
         protected override Assembly? Load(AssemblyName assemblyName)
         {
+            var shared = new[] {
+                "SharpPress", "Microsoft.Extensions.DependencyInjection",
+                "Newtonsoft.Json", "MySqlConnector"
+            };
+
+            if (assemblyName.Name != null &&
+                shared.Contains(assemblyName.Name, StringComparer.OrdinalIgnoreCase))
+                return null;
+
             var path = _resolver.ResolveAssemblyToPath(assemblyName);
             return path != null ? LoadFromAssemblyPath(path) : null;
         }
@@ -533,10 +542,20 @@ namespace SharpPress.Services
 
         public void NotifyChange()
         {
-            using var newCts = new CancellationTokenSource();
+            var newCts = new CancellationTokenSource();
+
             var old = Interlocked.Exchange(ref _cts, newCts);
-            old.Cancel();
-            old.Dispose();
+
+            if (old != null)
+            {
+                try
+                {
+                    old.Cancel();
+                }
+                catch (ObjectDisposedException) { }
+
+                old.Dispose();
+            }
         }
     }
 }

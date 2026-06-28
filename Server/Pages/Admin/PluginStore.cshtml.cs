@@ -62,7 +62,7 @@ namespace SharpPress.Pages
             var fileName = Path.GetFileName(plugin.DownloadUrl);
             var filePath = Path.Combine("plugins", fileName);
 
-            var existingKey = pluginManager._pluginToAssemblyPath.FirstOrDefault(p => p.Value == filePath).Key;
+            var existingKey = pluginManager.PluginToAssemblyPath.FirstOrDefault(p => p.Value == filePath).Key;
 
             if (System.IO.File.Exists(filePath) && !string.IsNullOrWhiteSpace(existingKey))
             {

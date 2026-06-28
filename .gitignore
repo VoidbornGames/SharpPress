@@ -3,6 +3,7 @@
 *.user
 *.suo
 *.cache
+*.bat
 
 # Build outputs
 bin/
