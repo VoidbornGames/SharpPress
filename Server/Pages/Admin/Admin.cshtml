@@ -331,6 +331,26 @@
     .dashboard-card {
         animation: cardFadeIn 0.5s cubic-bezier(0.4, 0, 0.2, 1) 0.45s backwards;
     }
+
+    .dashboard-table td.log-info {
+        color: ghostwhite;
+    }
+
+    .dashboard-table td.log-error {
+        color: red;
+    }
+
+    .dashboard-table td.log-warning {
+        color: #f59e0b;
+    }
+
+    .dashboard-table td.log-security {
+        color: darkblue;
+    }
+
+    .dashboard-table td.log-custom {
+        color: green;
+    }
 </style>
 
 <div class="dashboard-stats-grid">
@@ -433,13 +453,31 @@
             <table class="dashboard-table">
                 @foreach (var log in logs)
                 {
-                    string rowStyle = string.Empty;
-                    if (log.Contains("ERR")) rowStyle = "style=\"color: #fca5a5;\"";
-                    else if (log.Contains("WRN")) rowStyle = "style=\"color: #fde68a;\"";
-                    else if (log.Contains("INF")) rowStyle = "style=\"color: #93c5fd;\"";
+                    var level = "";
+
+                    var start = log.IndexOf('[');
+                    if (start >= 0)
+                    {
+                        start = log.IndexOf('[', start + 1);
+                        if (start >= 0)
+                        {
+                            var end = log.IndexOf(']', start + 1);
+                            if (end > start)
+                                level = log.Substring(start + 1, end - start - 1);
+                        }
+                    }
+
+                    var cssClass = level switch
+                    {
+                        "INFO" => "log-info",
+                        "ERROR" => "log-error",
+                        "WARNING" => "log-warning",
+                        "SECURITY" => "log-security",
+                        _ => "log-custom"
+                    };
 
                     <tr>
-                        <td @rowStyle>@log</td>
+                        <td class="@cssClass">@log</td>
                     </tr>
                 }
             </table>
